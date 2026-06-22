@@ -54,6 +54,12 @@ title: 章节标题
 
 同一输入目录一次只能有一个活跃 run。当前项目锁实现依赖 POSIX `fcntl`，使用 `.inklink.lock` 记录当前 `run_id`，并通过输入目录的 OS 级文件锁保持互斥；释放时解锁并关闭持有的目录文件描述符，不按路径删除锁文件。
 
+## 状态与事件
+
+运行状态使用 SQLite 保存。状态库初始化时会创建父目录并建立 `runs`、`nodes`、`llm_calls`、`tool_calls`、`artifacts`、`approvals` 和 `messages` 表；当前公开的最小接口支持创建/读取 run，以及幂等写入和读取 workflow node。
+
+事件审计使用 JSONL 追加日志。每行都是一个独立 JSON 对象，包含 UTC ISO 时间戳、事件类型和事件 payload，并使用 UTF-8 与 `ensure_ascii=False` 保留中文内容。
+
 ## 确定性检查
 
 当前确定性检查函数覆盖：
