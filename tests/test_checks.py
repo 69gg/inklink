@@ -1,3 +1,5 @@
+import unicodedata
+
 import pytest
 from pydantic import ValidationError
 
@@ -19,6 +21,12 @@ def test_count_chinese_chars_includes_extension_i() -> None:
 
 def test_count_chinese_chars_ignores_unassigned_cjk_block_codepoints() -> None:
     assert count_chinese_chars("\U0002ee5e") == 0
+
+
+def test_count_chinese_chars_follows_python_unicodedata_assignment() -> None:
+    candidate = "\U000323b0"
+    expected = 1 if unicodedata.name(candidate, "").startswith("CJK UNIFIED IDEOGRAPH-") else 0
+    assert count_chinese_chars(candidate) == expected
 
 
 def test_chapter_contract_rejects_invalid_ranges() -> None:
