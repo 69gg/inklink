@@ -169,6 +169,19 @@ def test_entity_mention_rejects_coerced_identity_integers(
         EntityMention.model_validate(payload)
 
 
+@pytest.mark.parametrize("coerced_value", ["2", 2.0, True])
+def test_entity_mention_rejects_coerced_strength(coerced_value: object) -> None:
+    with pytest.raises(ValidationError):
+        EntityMention.model_validate(
+            {
+                "entity_id": "c1",
+                "chapter_number": 1,
+                "generation": 1,
+                "strength": coerced_value,
+            }
+        )
+
+
 @pytest.mark.parametrize("coerced_value", ["1", 1.0, True])
 @pytest.mark.parametrize("field_name", ["first_mentioned_chapter", "last_mentioned_chapter"])
 def test_character_entry_rejects_coerced_chapter_integers(
@@ -185,6 +198,20 @@ def test_character_entry_rejects_coerced_chapter_integers(
 
     with pytest.raises(ValidationError):
         CharacterIndexEntry.model_validate(payload)
+
+
+@pytest.mark.parametrize("coerced_value", ["2", 2.0, True])
+def test_character_entry_rejects_coerced_active_score(coerced_value: object) -> None:
+    with pytest.raises(ValidationError):
+        CharacterIndexEntry.model_validate(
+            {
+                "entity_id": "c1",
+                "first_mentioned_chapter": 1,
+                "last_mentioned_chapter": 1,
+                "active_score": coerced_value,
+                "related_chapters": [1],
+            }
+        )
 
 
 @pytest.mark.parametrize("coerced_value", ["1", 1.0, True])

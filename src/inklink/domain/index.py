@@ -13,6 +13,7 @@ from pydantic import (
 )
 
 type PositiveInt = Annotated[int, Field(strict=True, gt=0)]
+type NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 type GenerationIdentity = tuple[PositiveInt, PositiveInt]
 
 _GENERATION_IDENTITY_ADAPTER: TypeAdapter[GenerationIdentity] = TypeAdapter(GenerationIdentity)
@@ -24,7 +25,7 @@ class EntityMention(BaseModel):
     entity_id: str = Field(min_length=1)
     chapter_number: PositiveInt
     generation: PositiveInt
-    strength: int = Field(ge=0)
+    strength: NonNegativeInt
 
     @field_validator("entity_id")
     @classmethod
@@ -40,7 +41,7 @@ class CharacterIndexEntry(BaseModel):
     entity_id: str = Field(min_length=1)
     first_mentioned_chapter: PositiveInt
     last_mentioned_chapter: PositiveInt
-    active_score: int = Field(ge=0)
+    active_score: NonNegativeInt
     related_chapters: list[PositiveInt] = Field(default_factory=list)
 
     @field_validator("entity_id")
