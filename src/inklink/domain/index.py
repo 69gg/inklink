@@ -1,14 +1,29 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Annotated, Any, Self
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
+
+type PositiveInt = Annotated[int, Field(gt=0)]
+type GenerationIdentity = tuple[PositiveInt, PositiveInt]
+
+_GENERATION_IDENTITY_ADAPTER: TypeAdapter[GenerationIdentity] = TypeAdapter(GenerationIdentity)
 
 
 class EntityMention(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     entity_id: str = Field(min_length=1)
-    chapter_number: int = Field(gt=0)
-    generation: int = Field(gt=0)
+    chapter_number: PositiveInt
+    generation: PositiveInt
     strength: int = Field(ge=0)
 
     @field_validator("entity_id")
@@ -23,10 +38,10 @@ class CharacterIndexEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     entity_id: str = Field(min_length=1)
-    first_mentioned_chapter: int = Field(gt=0)
-    last_mentioned_chapter: int = Field(gt=0)
+    first_mentioned_chapter: PositiveInt
+    last_mentioned_chapter: PositiveInt
     active_score: int = Field(ge=0)
-    related_chapters: list[int] = Field(default_factory=list)
+    related_chapters: list[PositiveInt] = Field(default_factory=list)
 
     @field_validator("entity_id")
     @classmethod
@@ -35,26 +50,47 @@ class CharacterIndexEntry(BaseModel):
             raise ValueError("entity_id must not be blank")
         return value
 
+    @field_validator("related_chapters")
+    @classmethod
+    def normalize_related_chapters(cls, values: list[int]) -> list[int]:
+        return sorted(set(values))
+
 
 class StoryIndex(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mentions: list[EntityMention] = Field(default_factory=list)
-    abandoned_generations: set[tuple[int, int]] = Field(default_factory=set)
+    abandoned_generations: set[GenerationIdentity] = Field(default_factory=set)
     characters: dict[str, CharacterIndexEntry] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_input_characters(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "characters" not in data:
+            return data
+        return {key: value for key, value in data.items() if key != "characters"}
+
+    @model_validator(mode="after")
+    def normalize_and_rebuild(self) -> Self:
+        self.mentions = _normalize_mentions(self.mentions)
+        self.rebuild()
+        return self
+
+    @field_serializer("abandoned_generations")
+    def serialize_abandoned_generations(
+        self, abandoned_generations: set[GenerationIdentity]
+    ) -> list[GenerationIdentity]:
+        return sorted(abandoned_generations)
+
     def upsert_mentions(self, mentions: list[EntityMention]) -> None:
-        by_identity = {
-            (mention.entity_id, mention.chapter_number, mention.generation): mention
-            for mention in self.mentions
-        }
-        for mention in mentions:
-            by_identity[(mention.entity_id, mention.chapter_number, mention.generation)] = mention
-        self.mentions = list(by_identity.values())
+        self.mentions = _normalize_mentions([*self.mentions, *mentions])
         self.rebuild()
 
     def abandon_generation(self, chapter_number: int, generation: int) -> None:
-        self.abandoned_generations.add((chapter_number, generation))
+        generation_identity = _GENERATION_IDENTITY_ADAPTER.validate_python(
+            (chapter_number, generation)
+        )
+        self.abandoned_generations.add(generation_identity)
         self.rebuild()
 
     def rebuild(self) -> None:
@@ -79,3 +115,12 @@ class StoryIndex(BaseModel):
             for mention in self.mentions
             if (mention.chapter_number, mention.generation) not in self.abandoned_generations
         ]
+
+
+def _mention_identity(mention: EntityMention) -> tuple[str, int, int]:
+    return mention.entity_id, mention.chapter_number, mention.generation
+
+
+def _normalize_mentions(mentions: list[EntityMention]) -> list[EntityMention]:
+    by_identity = {_mention_identity(mention): mention for mention in mentions}
+    return [by_identity[identity] for identity in sorted(by_identity)]
