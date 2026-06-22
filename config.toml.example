@@ -47,7 +47,8 @@ api_key_env = "OPENAI_API_KEY"
 # 留空使用 SDK 默认地址；兼容服务可填写自定义 /v1 base_url。
 base_url = ""
 
-# 空值不传给 SDK。
+# 空值不传给 SDK。reasoning_effort 可填 none、minimal、low、medium、high、xhigh；
+# 具体模型是否支持某个值由模型和 API 侧决定。
 temperature = ""
 top_p = ""
 reasoning_effort = ""

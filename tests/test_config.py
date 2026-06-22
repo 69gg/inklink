@@ -31,23 +31,22 @@ drafting = "default"
     assert config.profile_for_task("drafting") == "default"
 
 
-def test_empty_optional_values_are_omitted() -> None:
-    config = AppConfig.model_validate(
-        {
-            "models": {
-                "default": {
-                    "api": "responses",
-                    "model": "gpt-test",
-                    "api_key_env": "OPENAI_API_KEY",
-                    "base_url": "",
-                    "temperature": None,
-                }
-            }
-        }
+def test_empty_optional_values_are_omitted(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[models.default]
+api = "responses"
+model = "gpt-test"
+api_key_env = "OPENAI_API_KEY"
+base_url = ""
+temperature = ""
+""",
+        encoding="utf-8",
     )
-    options = request_options_for_profile(config.models["default"])
-    assert "base_url" not in options
-    assert "temperature" not in options
+    profile = load_config(path).models["default"]
+    assert "base_url" not in client_options_for_profile(profile)
+    assert "temperature" not in request_options_for_profile(profile)
 
 
 def test_load_config_normalizes_blank_optional_values(tmp_path: Path) -> None:
@@ -164,6 +163,70 @@ def test_task_profiles_must_exist() -> None:
                     }
                 },
                 "tasks": {"drafting": "missing"},
+            }
+        )
+
+
+def test_profile_for_task_returns_configured_profile() -> None:
+    config = AppConfig.model_validate(
+        {
+            "models": {
+                "default": {
+                    "api": "responses",
+                    "model": "gpt-test",
+                },
+                "draft": {
+                    "api": "chat_completions",
+                    "model": "gpt-draft",
+                },
+            },
+            "tasks": {"drafting": "draft"},
+        }
+    )
+    assert config.profile_for_task("drafting") == "draft"
+    assert config.profile_for_task("review") == "default"
+
+
+def test_unknown_config_fields_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="extra"):
+        AppConfig.model_validate(
+            {
+                "models": {
+                    "default": {
+                        "api": "responses",
+                        "model": "gpt-test",
+                        "unexpected": True,
+                    }
+                }
+            }
+        )
+
+
+def test_invalid_api_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(
+            {
+                "models": {
+                    "default": {
+                        "api": "completion",
+                        "model": "gpt-test",
+                    }
+                }
+            }
+        )
+
+
+def test_invalid_reasoning_effort_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="hihg"):
+        AppConfig.model_validate(
+            {
+                "models": {
+                    "default": {
+                        "api": "responses",
+                        "model": "gpt-test",
+                        "reasoning_effort": "hihg",
+                    }
+                }
             }
         )
 
