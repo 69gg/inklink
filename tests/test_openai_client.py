@@ -14,6 +14,23 @@ from inklink.llm.openai_client import (
 )
 from inklink.llm.types import LLMToolCall, NormalizedUsage
 
+RESPONSES_TOOL_SCHEMA: dict[str, object] = {
+    "type": "function",
+    "name": "record_chapter_analysis",
+    "description": "Record extracted analysis.",
+    "parameters": {"type": "object"},
+    "strict": True,
+}
+
+CHAT_TOOL_SCHEMA: dict[str, object] = {
+    "type": "function",
+    "function": {
+        "name": "record_chapter_analysis",
+        "description": "Record extracted analysis.",
+        "parameters": {"type": "object"},
+    },
+}
+
 
 class FakeCreateEndpoint:
     def __init__(self, response: object) -> None:
@@ -134,16 +151,7 @@ async def test_responses_adapter_creates_request_and_normalizes_response() -> No
     request = LLMRequest(
         instructions="Extract chapter information.",
         input_text="Chapter one text.",
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "record_chapter_analysis",
-                    "description": "Record extracted analysis.",
-                    "parameters": {"type": "object"},
-                },
-            }
-        ],
+        tools=[RESPONSES_TOOL_SCHEMA],
         tool_choice="auto",
         previous_response_id="resp-previous",
     )
@@ -199,6 +207,12 @@ async def test_responses_adapter_uses_empty_text_and_request_id_fallback() -> No
 
     assert result.text == ""
     assert result.request_id == "req-fallback"
+    assert client.responses.kwargs == {
+        "model": "gpt-test",
+        "instructions": None,
+        "input": "chapter text",
+        "tools": [],
+    }
 
 
 async def test_chat_adapter_creates_request_and_normalizes_response() -> None:
@@ -245,16 +259,7 @@ async def test_chat_adapter_creates_request_and_normalizes_response() -> None:
             LLMMessage(role="assistant", content="Existing summary."),
         ],
         input_text="unused fallback",
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "record_chapter_analysis",
-                    "description": "Record extracted analysis.",
-                    "parameters": {"type": "object"},
-                },
-            }
-        ],
+        tools=[CHAT_TOOL_SCHEMA],
         tool_choice={"type": "function", "function": {"name": "record_chapter_analysis"}},
     )
 
@@ -313,7 +318,6 @@ async def test_chat_adapter_uses_input_text_when_messages_are_empty() -> None:
         "model": "gpt-chat",
         "messages": [{"role": "user", "content": "chapter text"}],
         "tools": [],
-        "tool_choice": None,
     }
     assert result.text == ""
     assert result.request_id == "req-chat-fallback"

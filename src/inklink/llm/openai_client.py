@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,19 +37,18 @@ class _CreateEndpoint(Protocol):
 
 
 class _ResponsesClient(Protocol):
-    responses: _CreateEndpoint
-
-
-class _ChatCompletions(Protocol):
-    async def create(self, **kwargs: object) -> object: ...
+    @property
+    def responses(self) -> object: ...
 
 
 class _ChatNamespace(Protocol):
-    completions: _ChatCompletions
+    @property
+    def completions(self) -> object: ...
 
 
 class _ChatClient(Protocol):
-    chat: _ChatNamespace
+    @property
+    def chat(self) -> _ChatNamespace: ...
 
 
 def make_async_openai(profile: ModelProfile, api_key: str | None) -> AsyncOpenAI:
@@ -70,13 +69,15 @@ class ResponsesAdapter:
             "instructions": request.instructions,
             "input": request.input_text,
             "tools": request.tools,
-            "tool_choice": request.tool_choice,
             **request_options_for_profile(self._profile),
         }
+        if request.tool_choice is not None:
+            kwargs["tool_choice"] = request.tool_choice
         if request.previous_response_id is not None:
             kwargs["previous_response_id"] = request.previous_response_id
 
-        response = await self._client.responses.create(**kwargs)
+        endpoint = cast(_CreateEndpoint, self._client.responses)
+        response = await endpoint.create(**kwargs)
         return LLMResponse(
             text=_string_or_empty(_read(response, "output_text")),
             tool_calls=_parse_responses_tool_calls(_read(response, "output")),
@@ -95,10 +96,12 @@ class ChatCompletionsAdapter:
             "model": self._profile.model,
             "messages": _chat_messages(request),
             "tools": request.tools,
-            "tool_choice": request.tool_choice,
             **request_options_for_profile(self._profile),
         }
-        response = await self._client.chat.completions.create(**kwargs)
+        if request.tool_choice is not None:
+            kwargs["tool_choice"] = request.tool_choice
+        endpoint = cast(_CreateEndpoint, self._client.chat.completions)
+        response = await endpoint.create(**kwargs)
         message = _first_choice_message(response)
         return LLMResponse(
             text=_string_or_empty(_read(message, "content")),

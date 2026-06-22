@@ -12,6 +12,7 @@ class ToolDefinition:
     description: str
     parameters: dict[str, object]
     handler: ToolHandler
+    strict: bool = True
 
 
 class ToolRegistry:
@@ -39,7 +40,7 @@ class ToolRegistry:
             ]
         )
 
-    def openai_tool_schemas(self) -> list[dict[str, object]]:
+    def chat_tool_schemas(self) -> list[dict[str, object]]:
         return [
             {
                 "type": "function",
@@ -51,6 +52,21 @@ class ToolRegistry:
             }
             for tool in self._tools.values()
         ]
+
+    def responses_tool_schemas(self) -> list[dict[str, object]]:
+        return [
+            {
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": tool.strict,
+            }
+            for tool in self._tools.values()
+        ]
+
+    def openai_tool_schemas(self) -> list[dict[str, object]]:
+        return self.chat_tool_schemas()
 
     def dispatch(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         try:

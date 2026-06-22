@@ -5,10 +5,10 @@ import pytest
 from inklink.tools.registry import ToolRegistry
 
 
-def test_default_registry_exposes_openai_function_schema() -> None:
+def test_default_registry_exposes_chat_function_schema() -> None:
     registry = ToolRegistry.default()
 
-    schemas = registry.openai_tool_schemas()
+    schemas = registry.chat_tool_schemas()
 
     schema = next(item for item in schemas if item["function"]["name"] == "record_chapter_analysis")
     function = schema["function"]
@@ -19,6 +19,29 @@ def test_default_registry_exposes_openai_function_schema() -> None:
     assert properties["chapter_number"]["type"] == "integer"
     assert properties["summary"]["type"] == "string"
     assert set(parameters["required"]) == {"chapter_number", "summary"}
+
+
+def test_default_registry_exposes_responses_function_schema() -> None:
+    registry = ToolRegistry.default()
+
+    schemas = registry.responses_tool_schemas()
+
+    schema = next(item for item in schemas if item["name"] == "record_chapter_analysis")
+    parameters = schema["parameters"]
+    properties = parameters["properties"]
+    assert schema["type"] == "function"
+    assert schema["description"]
+    assert schema["strict"] is True
+    assert "function" not in schema
+    assert properties["chapter_number"]["type"] == "integer"
+    assert properties["summary"]["type"] == "string"
+    assert set(parameters["required"]) == {"chapter_number", "summary"}
+
+
+def test_openai_tool_schemas_remains_chat_schema() -> None:
+    registry = ToolRegistry.default()
+
+    assert registry.openai_tool_schemas() == registry.chat_tool_schemas()
 
 
 def test_dispatch_calls_known_tool_handler() -> None:
