@@ -17,6 +17,10 @@ def test_count_chinese_chars_includes_extension_i() -> None:
     assert count_chinese_chars("\U0002ebf0A1。") == 1
 
 
+def test_count_chinese_chars_ignores_unassigned_cjk_block_codepoints() -> None:
+    assert count_chinese_chars("\U0002ee5e") == 0
+
+
 def test_chapter_contract_rejects_invalid_ranges() -> None:
     with pytest.raises(ValidationError):
         ChapterContract(
@@ -26,6 +30,29 @@ def test_chapter_contract_rejects_invalid_ranges() -> None:
             max_chars=1,
             required_characters=[],
             required_keywords=[],
+            scene_ids=[],
+        )
+
+
+def test_chapter_contract_rejects_blank_required_terms() -> None:
+    with pytest.raises(ValidationError):
+        ChapterContract(
+            chapter_number=1,
+            title="第一章",
+            min_chars=1,
+            max_chars=10,
+            required_characters=[" "],
+            required_keywords=["玉佩"],
+            scene_ids=[],
+        )
+    with pytest.raises(ValidationError):
+        ChapterContract(
+            chapter_number=1,
+            title="第一章",
+            min_chars=1,
+            max_chars=10,
+            required_characters=["林青"],
+            required_keywords=[""],
             scene_ids=[],
         )
 

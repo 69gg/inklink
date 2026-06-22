@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unicodedata
+
 from inklink.domain.models import (
     ChapterContract,
     CheckIssue,
@@ -28,6 +30,12 @@ def count_chinese_chars(text: str) -> int:
 
 
 def _is_cjk_unified_ideograph(char: str) -> bool:
+    try:
+        name = unicodedata.name(char)
+    except ValueError:
+        return False
+    if not name.startswith("CJK UNIFIED IDEOGRAPH-"):
+        return False
     codepoint = ord(char)
     return any(start <= codepoint <= end for start, end in CJK_UNIFIED_IDEOGRAPH_RANGES)
 

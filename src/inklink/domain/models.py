@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PlotThreadStatus(StrEnum):
@@ -24,6 +24,14 @@ class ChapterContract(BaseModel):
     required_characters: list[str] = Field(default_factory=list)
     required_keywords: list[str] = Field(default_factory=list)
     scene_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("required_characters", "required_keywords", "scene_ids")
+    @classmethod
+    def validate_non_blank_items(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not value.strip():
+                raise ValueError("list items must not be blank")
+        return values
 
     @model_validator(mode="after")
     def validate_char_range(self) -> Self:
