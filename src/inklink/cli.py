@@ -4,6 +4,7 @@ from typing import Annotated
 import typer
 
 from inklink import __version__
+from inklink.tui.app import InklinkApp
 
 app = typer.Typer(help="墨连 Inklink: AI-driven Chinese novel continuation TUI.")
 
@@ -20,4 +21,4 @@ def run(
     config: Annotated[Path, typer.Option(help="Path to config.toml.")] = Path("config.toml"),
 ) -> None:
     """Launch the Inklink TUI."""
-    typer.echo(f"Starting Inklink with config={config} input_dir={input_dir}")
+    InklinkApp(input_dir=input_dir, config=config).run()
