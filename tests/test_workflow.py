@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import sqlite3
+from pathlib import Path
 from typing import NoReturn, cast
 
 import pytest
@@ -7,6 +10,7 @@ from pydantic import ValidationError
 
 from inklink.workflow.executor import WorkflowExecutor
 from inklink.workflow.models import IdempotencyInputs, NodeState, WorkflowNode, idempotency_key
+from inklink.workflow.service import WorkflowService, WorkflowServiceError
 
 
 def make_idempotency_inputs(
@@ -30,6 +34,10 @@ def make_idempotency_inputs(
         approval_messages_hash=approval_messages_hash,
         generation=generation,
     )
+
+
+def write_workflow_chapter(path: Path, title: str = "第一章", body: str = "正文") -> None:
+    path.write_text(f"title: {title}\n---\n{body}", encoding="utf-8")
 
 
 def test_runs_nodes_in_dependency_order() -> None:
@@ -335,3 +343,136 @@ def test_failed_dependency_blocks_dependents_on_later_run() -> None:
     executor.run(lambda node: None)
 
     assert check.state is NodeState.PENDING
+
+
+def test_service_creates_runtime_state_events_and_loads_chapter_count(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt", "第一章", "正文一")
+    write_workflow_chapter(project / "2.txt", "第二章", "正文二")
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        run = service.start_run(project)
+
+        assert run.runtime_id
+        assert run.input_dir == project.resolve()
+        assert run.log_dir == tmp_path / "logs" / run.runtime_id
+        assert run.chapter_count == 2
+        assert (run.log_dir / "state.sqlite").is_file()
+        assert (run.log_dir / "events.jsonl").is_file()
+
+        connection = sqlite3.connect(run.log_dir / "state.sqlite")
+        connection.row_factory = sqlite3.Row
+        try:
+            row = connection.execute(
+                "SELECT runtime_id, input_dir, status FROM runs WHERE runtime_id = ?",
+                (run.runtime_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+
+        assert dict(row) == {
+            "runtime_id": run.runtime_id,
+            "input_dir": str(project.resolve()),
+            "status": "running",
+        }
+        events = [
+            json.loads(line)
+            for line in (run.log_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert events[0]["event_type"] == "run_started"
+        assert events[0]["payload"] == {
+            "runtime_id": run.runtime_id,
+            "input_dir": str(project.resolve()),
+            "chapter_count": 2,
+        }
+
+
+def test_service_blocks_duplicate_project_within_same_service(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        service.start_run(project)
+
+        check = service.can_start_run(project)
+
+        assert check.allowed is False
+        assert str(project.resolve()) in check.reason
+        with pytest.raises(WorkflowServiceError, match="active run"):
+            service.start_run(project)
+
+
+def test_service_close_releases_project_lock_for_another_service(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+
+    first = WorkflowService(log_root=tmp_path / "first-logs")
+    first.start_run(project)
+    first.close()
+
+    with WorkflowService(log_root=tmp_path / "second-logs") as second:
+        run = second.start_run(project)
+
+    assert run.input_dir == project.resolve()
+
+
+def test_service_start_failure_releases_project_lock(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    (project / "1.txt").write_text("title: 第一章\n正文缺少分隔符", encoding="utf-8")
+
+    service = WorkflowService(log_root=tmp_path / "failed-logs")
+    with pytest.raises(ValueError, match="separator"):
+        service.start_run(project)
+    service.close()
+
+    write_workflow_chapter(project / "1.txt")
+    with WorkflowService(log_root=tmp_path / "valid-logs") as next_service:
+        run = next_service.start_run(project)
+
+    assert run.chapter_count == 1
+
+
+def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        run = service.start_run(project)
+
+        abandon = service.abandon_chapter(1)
+        rewrite = service.rewrite_chapter(1)
+        retry = service.retry_node("draft-1")
+
+        assert abandon.accepted is True
+        assert "accepted" in abandon.message
+        assert "TODO" in abandon.message
+        assert rewrite.accepted is True
+        assert "accepted" in rewrite.message
+        assert "TODO" in rewrite.message
+        assert retry.accepted is True
+        assert "accepted" in retry.message
+        with pytest.raises(ValueError, match="chapter_number"):
+            service.abandon_chapter(0)
+        with pytest.raises(ValueError, match="chapter_number"):
+            service.rewrite_chapter(-1)
+        with pytest.raises(ValueError, match="node_id"):
+            service.retry_node(" ")
+
+    events = [
+        json.loads(line)
+        for line in (run.log_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["event_type"] for event in events] == [
+        "run_started",
+        "chapter_abandon_requested",
+        "chapter_rewrite_requested",
+        "node_retry_requested",
+    ]
+    assert events[1]["payload"] == {"runtime_id": run.runtime_id, "chapter_number": 1}
+    assert events[2]["payload"] == {"runtime_id": run.runtime_id, "chapter_number": 1}
+    assert events[3]["payload"] == {"runtime_id": run.runtime_id, "node_id": "draft-1"}
