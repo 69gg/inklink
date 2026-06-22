@@ -12,7 +12,7 @@ from pydantic import (
     model_validator,
 )
 
-type PositiveInt = Annotated[int, Field(gt=0)]
+type PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 type GenerationIdentity = tuple[PositiveInt, PositiveInt]
 
 _GENERATION_IDENTITY_ADAPTER: TypeAdapter[GenerationIdentity] = TypeAdapter(GenerationIdentity)
@@ -54,6 +54,14 @@ class CharacterIndexEntry(BaseModel):
     @classmethod
     def normalize_related_chapters(cls, values: list[int]) -> list[int]:
         return sorted(set(values))
+
+    @model_validator(mode="after")
+    def validate_chapter_range(self) -> Self:
+        if self.first_mentioned_chapter > self.last_mentioned_chapter:
+            raise ValueError(
+                "first_mentioned_chapter must be less than or equal to last_mentioned_chapter"
+            )
+        return self
 
 
 class StoryIndex(BaseModel):

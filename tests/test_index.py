@@ -152,6 +152,68 @@ def test_character_entry_rejects_invalid_basic_fields(payload: dict[str, object]
         CharacterIndexEntry.model_validate(payload)
 
 
+@pytest.mark.parametrize("coerced_value", ["1", 1.0, True])
+@pytest.mark.parametrize("field_name", ["chapter_number", "generation"])
+def test_entity_mention_rejects_coerced_identity_integers(
+    field_name: str, coerced_value: object
+) -> None:
+    payload: dict[str, object] = {
+        "entity_id": "c1",
+        "chapter_number": 1,
+        "generation": 1,
+        "strength": 1,
+        field_name: coerced_value,
+    }
+
+    with pytest.raises(ValidationError):
+        EntityMention.model_validate(payload)
+
+
+@pytest.mark.parametrize("coerced_value", ["1", 1.0, True])
+@pytest.mark.parametrize("field_name", ["first_mentioned_chapter", "last_mentioned_chapter"])
+def test_character_entry_rejects_coerced_chapter_integers(
+    field_name: str, coerced_value: object
+) -> None:
+    payload: dict[str, object] = {
+        "entity_id": "c1",
+        "first_mentioned_chapter": 1,
+        "last_mentioned_chapter": 1,
+        "active_score": 1,
+        "related_chapters": [1],
+        field_name: coerced_value,
+    }
+
+    with pytest.raises(ValidationError):
+        CharacterIndexEntry.model_validate(payload)
+
+
+@pytest.mark.parametrize("coerced_value", ["1", 1.0, True])
+def test_character_entry_rejects_coerced_related_chapters(coerced_value: object) -> None:
+    with pytest.raises(ValidationError):
+        CharacterIndexEntry.model_validate(
+            {
+                "entity_id": "c1",
+                "first_mentioned_chapter": 1,
+                "last_mentioned_chapter": 1,
+                "active_score": 1,
+                "related_chapters": [coerced_value],
+            }
+        )
+
+
+def test_character_entry_rejects_first_chapter_after_last_chapter() -> None:
+    with pytest.raises(ValidationError):
+        CharacterIndexEntry.model_validate(
+            {
+                "entity_id": "c1",
+                "first_mentioned_chapter": 2,
+                "last_mentioned_chapter": 1,
+                "active_score": 1,
+                "related_chapters": [1, 2],
+            }
+        )
+
+
 def test_story_index_rebuilds_characters_from_mentions_on_initialization() -> None:
     index = StoryIndex(
         mentions=[
@@ -218,6 +280,30 @@ def test_abandon_generation_rejects_invalid_values() -> None:
         index.abandon_generation(0, -1)
 
 
+@pytest.mark.parametrize("abandoned_generation", [("1", 1), (1.0, 1), (True, 1)])
+def test_abandoned_generations_reject_coerced_values(
+    abandoned_generation: tuple[object, int],
+) -> None:
+    with pytest.raises(ValidationError):
+        StoryIndex.model_validate({"abandoned_generations": [abandoned_generation]})
+
+
+@pytest.mark.parametrize("chapter_number", [True, "1", 1.0])
+def test_abandon_generation_rejects_coerced_chapter_numbers(chapter_number: object) -> None:
+    index = StoryIndex()
+
+    with pytest.raises(ValidationError):
+        index.abandon_generation(chapter_number, 1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("generation", [True, "1", 1.0])
+def test_abandon_generation_rejects_coerced_generations(generation: object) -> None:
+    index = StoryIndex()
+
+    with pytest.raises(ValidationError):
+        index.abandon_generation(1, generation)  # type: ignore[arg-type]
+
+
 def test_mentions_dump_order_is_stable_across_upsert_order() -> None:
     first = StoryIndex()
     first.upsert_mentions(
@@ -246,3 +332,20 @@ def test_mentions_dump_order_is_stable_across_upsert_order() -> None:
         ("c1", 3, 2),
         ("c2", 2, 1),
     ]
+
+
+def test_story_index_json_round_trip_is_stable() -> None:
+    index = StoryIndex()
+    index.upsert_mentions(
+        [
+            EntityMention(entity_id="c2", chapter_number=2, generation=1, strength=1),
+            EntityMention(entity_id="c1", chapter_number=3, generation=1, strength=4),
+            EntityMention(entity_id="c1", chapter_number=3, generation=2, strength=2),
+        ]
+    )
+    index.abandon_generation(chapter_number=3, generation=2)
+
+    restored = StoryIndex.model_validate_json(index.model_dump_json())
+
+    assert restored == index
+    assert restored.model_dump() == index.model_dump()
