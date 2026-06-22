@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,3 +20,5 @@ class JsonlEventLog:
         line = json.dumps(event, ensure_ascii=False)
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(f"{line}\n")
+            handle.flush()
+            os.fsync(handle.fileno())

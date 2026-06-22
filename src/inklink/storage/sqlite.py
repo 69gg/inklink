@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from types import TracebackType
 from typing import cast
 
 from inklink.storage.schema import SCHEMA_SQL
@@ -15,10 +16,29 @@ class StateStore:
     def open(cls, path: Path) -> StateStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path)
-        connection.row_factory = sqlite3.Row
-        connection.executescript(SCHEMA_SQL)
-        connection.commit()
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.executescript(SCHEMA_SQL)
+            connection.commit()
+        except BaseException:
+            connection.close()
+            raise
         return cls(connection)
+
+    def __enter__(self) -> StateStore:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._connection.close()
 
     def create_run(self, runtime_id: str, input_dir: str, status: str) -> None:
         self._connection.execute(

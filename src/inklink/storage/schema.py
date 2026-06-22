@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS llm_calls (
   runtime_id TEXT,
   task_type TEXT,
   model TEXT,
-  usage_json TEXT
+  usage_json TEXT,
+  FOREIGN KEY(runtime_id) REFERENCES runs(runtime_id)
 );
 
 CREATE TABLE IF NOT EXISTS tool_calls (
@@ -26,7 +27,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   llm_call_id INTEGER,
   name TEXT NOT NULL,
   arguments_json TEXT NOT NULL,
-  result_json TEXT
+  result_json TEXT,
+  FOREIGN KEY(llm_call_id) REFERENCES llm_calls(id)
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -45,6 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
   message_id TEXT PRIMARY KEY,
   approval_id TEXT,
   role TEXT NOT NULL,
-  content TEXT NOT NULL
+  content TEXT NOT NULL,
+  FOREIGN KEY(approval_id) REFERENCES approvals(approval_id)
 );
 """
