@@ -13,6 +13,7 @@
 - 支持超长项目，例如 1000+ 章，不能把全文直接塞进上下文。
 - 支持多模型 profile 和任务映射，一个模型或多个模型都能工作。
 - 使用 SQLite + JSONL 保存状态和审计日志。
+- 使用确定性代码检查补充 LLM 自审。
 - 使用 `ruff format`、`ruff check`、`mypy`、`pytest` 保证质量。
 - 同步编写 README、配置文档、工作流文档、兼容性文档、开发文档和测试。
 
@@ -23,6 +24,7 @@
 - 首版不默认把中间产物导出为可人工编辑文件；恢复来源以 SQLite 为准。
 - 首版不抽象到 Anthropic、Gemini 等非 OpenAI-compatible SDK。
 - 首版不把工具做成外部 MCP server；工具是应用内部领域动作。
+- 首版不做额外内容过滤。内容边界由用户配置的模型及其服务策略决定；工具只执行用户配置、叙事一致性和确定性质量检查。
 
 ## 输入格式
 
@@ -46,6 +48,8 @@ title: 章节标题
 解析规则：
 
 - 文件名必须是连续正整数章节号。
+- 文件使用 UTF-8 编码。允许 UTF-8 BOM，解析时去除。
+- 允许 LF 或 CRLF 换行，解析时归一化为 `\n`。
 - 第一行必须以 `title:` 开头。
 - 标题和正文之间必须有独立的 `---` 分隔行。
 - 格式错误时在 TUI 和日志中给出清晰错误，不做宽松猜测。
@@ -78,6 +82,7 @@ Workflow 层是流程真相。它把续写拆成可恢复 DAG 节点：
 
 - `load_project`
 - `analyze_chapter[*]`
+- `summarize_range[*]`
 - `merge_story_state`
 - `plan_outline`
 - `approve_outline`
@@ -87,8 +92,10 @@ Workflow 层是流程真相。它把续写拆成可恢复 DAG 节点：
 - `approve_scene_plan[*]`
 - `draft_scene[*]`
 - `assemble_chapter[*]`
+- `check_chapter[*]`
 - `review_chapter[*]`
 - `revise_chapter[*]`
+- `integrate_generated_chapter[*]`
 - `write_output[*]`
 - `summarize_run`
 
@@ -143,6 +150,10 @@ Infrastructure 层负责：
 - token usage 归一化。
 - 错误分类。
 
+并发和限流只在 profile 队列这一层执行。DAG executor 只负责依赖触发、节点调度和状态变更，避免 executor 与 LLM adapter 两层同时限流导致行为不可预测。
+
+TUI 与 workflow service 在首版中是同进程边界：TUI 调用同进程 service 对象，service 以 SQLite 为恢复真相。TUI 关闭后，未完成 run 仍可通过 `resume` 重新读取 SQLite 继续执行；首版不要求后台 daemon 在 TUI 退出后继续运行。
+
 ## 核心数据流
 
 启动任务时，用户在 TUI 中选择输入目录、配置文件、notes、输出模式、续写范围、字数区间、修订轮数、模型任务映射和限流设置。系统生成 `runtime_id`，创建日志目录和 SQLite 状态。
@@ -151,21 +162,26 @@ Infrastructure 层负责：
 
 1. `load_project` 严格读取章节和 notes。
 2. `analyze_chapter[*]` 按章节提取剧情脉络、人物、关系、地点、世界观、伏笔、悬念、风格、禁忌和未解决事件。
-3. `merge_story_state` 合并为全书状态，包括已写大纲、人物表、关系网、世界观规则、事件时间线、伏笔表、文风摘要、冲突和悬念清单。
-4. `plan_outline` 生成后续总体大纲，并进入审批点。
-5. 用户在 TUI 中与 AI 讨论大纲，AI 通过工具更新大纲。用户批准后进入章节计划。
-6. `plan_chapters` 生成接下来 N 章的章节合同。
-7. 用户讨论并批准章节计划。
-8. `plan_scenes[*]` 为每章生成场景卡。
-9. 用户讨论并批准场景计划。
-10. `draft_scene[*]` 按场景生成正文。
-11. `assemble_chapter[*]` 合并场景为章节草稿。
-12. `review_chapter[*]` 自审章节质量。
-13. `revise_chapter[*]` 自动修订到通过或达到上限。
-14. `write_output[*]` 写入输出目录或写回输入目录。
-15. `summarize_run` 汇总调用次数和 token 统计。
+3. `summarize_range[*]` 为章节区间或分卷生成区间摘要，降低长篇合并成本。
+4. `merge_story_state` 增量合并全书状态，包括已写大纲、人物表、关系网、世界观规则、事件时间线、伏笔表、文风摘要、冲突和悬念清单。
+5. `plan_outline` 生成后续总体大纲，并进入审批点。
+6. 用户在 TUI 中与 AI 讨论大纲，AI 通过工具更新大纲。用户批准后进入章节计划。
+7. `plan_chapters` 生成接下来 N 章的章节合同。
+8. 用户讨论并批准章节计划。
+9. `plan_scenes[*]` 为每章生成场景卡。
+10. 用户讨论并批准场景计划。
+11. `draft_scene[*]` 按场景生成正文。
+12. `assemble_chapter[*]` 合并场景为章节草稿。
+13. `check_chapter[*]` 执行确定性代码检查。
+14. `review_chapter[*]` 用 LLM 自审确定性检查无法覆盖的问题。
+15. `revise_chapter[*]` 自动修订到通过或达到上限。
+16. `integrate_generated_chapter[*]` 把新生成章节的实际内容反哺到单章分析、区间摘要和全书状态。
+17. `write_output[*]` 写入输出目录或写回输入目录。
+18. `summarize_run` 汇总调用次数和 token 统计。
 
-大纲、章节计划、场景计划和自审失败是强审批点。审批点必须保留聊天面板，允许用户自由讨论。AI 只能通过工具更新当前 artifact，用户批准后才能进入下一阶段。
+大纲、章节计划、场景计划和自审失败是默认强审批点。审批点必须保留聊天面板，允许用户自由讨论。AI 只能通过工具更新当前 artifact，用户批准后才能进入下一阶段。
+
+为了避免审批疲劳，运行参数预留 `auto_approve` 模式。该模式可按审批类型配置，例如自动通过章节计划和场景计划，但仍在大纲或自审失败处暂停。默认关闭。
 
 ## 长篇规模设计
 
@@ -180,6 +196,7 @@ Infrastructure 层负责：
 - 当前续写上下文。
 - 当前章节合同。
 - 当前场景合同。
+- 结构化检索索引。
 
 生成某一章时，上下文只包含：
 
@@ -189,6 +206,30 @@ Infrastructure 层负责：
 - 当前章节合同。
 - 当前场景合同。
 - notes 约束。
+
+“必要原文片段”由检索层决定，不能只靠全书摘要。首版使用轻量结构化检索，不要求向量库：
+
+- 人物索引：人物名、别名、状态、首次/最后出场章节、近期活跃度、相关章节。
+- 伏笔索引：伏笔状态、来源章节、强化章节、建议回收窗口、相关人物和关键词。
+- 事件索引：事件类型、章节范围、参与人物、影响、未解决事项。
+- 世界观索引：规则、例外、来源章节、适用范围。
+- 关键词索引：地点、物品、组织、功法、道具等领域名词。
+
+组装 prompt 时，根据当前章节合同、场景合同、出场人物、待推进伏笔、用户讨论内容和近期章节，检索相关摘要和必要原文片段。第 50 章埋下并计划在第 800 章回收的伏笔，应通过伏笔索引和回收窗口被定向拉取，而不是依赖“全书状态摘要”碰巧保留细节。
+
+全书状态必须有衰减和活跃度机制：
+
+- 人物记录 `status = active | inactive | dead | unknown`。
+- 人物记录 `first_mentioned_chapter`、`last_mentioned_chapter`、`active_score`。
+- 伏笔记录生命周期状态，见“伏笔生命周期”。
+- 长期不活跃或已解决实体保留在 SQLite，不默认注入 prompt。
+- 当前章节相关、近期活跃、用户指定或检索命中的实体才进入上下文。
+
+分卷或区间摘要由 `summarize_range[*]` 节点显式生成。默认每满固定章节数或累计 token 量触发一次，也可由配置调整。`merge_story_state` 不应每次把全部单章分析重新喂给模型，而应优先基于已有全书状态、区间摘要和新增章节分析做增量合并。
+
+在同一次 run 内连续生成多章时，`integrate_generated_chapter[*]` 必须在每章通过检查和修订后执行。它把 AI 刚写完的一章生成轻量章节分析，并更新相关人物、伏笔、事件、区间摘要和全书状态，确保第 502 章能看到第 501 章实际发生的内容。
+
+冷启动模式默认关闭。用户首次导入 1000+ 章时，可选择开启冷启动模式：精读最近 N 章，其他历史章节先做粗摘要或区间摘要，后续按需补做细粒度分析。默认模式仍会完整分析已有章节，保证质量优先。
 
 每章都必须有 `chapter_contract`，用于保证“不多不少”和足够信息点：
 
@@ -201,6 +242,7 @@ Infrastructure 层负责：
 - 伏笔推进。
 - 结尾钩子。
 - 禁止事项。
+- 允许误差比例，默认参考配置中的字数容差。
 
 每个场景有 `scene_contract`：
 
@@ -212,8 +254,42 @@ Infrastructure 层负责：
 - 冲突或爽点。
 - 目标中文字数区间。
 - 与章节合同的对应关系。
+- 允许误差比例，默认参考配置中的字数容差。
 
 自审必须检查章节合同和场景合同是否被满足。未满足时进入自动修订。
+
+字数归约规则：
+
+- 用户配置每章和每场景的目标中文字数区间。
+- 场景计划的目标字数总和必须落在章节目标区间内，或落在配置容差内。
+- 默认容差由 `writing.word_count_tolerance_ratio` 控制，建议默认值为 `0.1`。
+- 确定性检查使用代码统计中文字数，不依赖 LLM 判断。
+
+## 伏笔生命周期
+
+伏笔不是简单列表，必须有生命周期状态机。
+
+状态：
+
+- `seeded`：已埋下。
+- `reinforced`：已强化或多次提醒。
+- `due`：到达建议回收窗口但尚未回收。
+- `resolved`：已回收。
+- `abandoned`：用户或计划明确废弃。
+
+伏笔记录字段至少包括：
+
+- ID。
+- 描述。
+- 状态。
+- 来源章节。
+- 强化章节列表。
+- 建议回收窗口。
+- 实际回收章节。
+- 相关人物、地点、物品和关键词。
+- 重要性。
+
+自审和计划阶段要检查是否重复回收、是否超期未回收、是否有高重要伏笔长期未推进。
 
 ## LLM/API 设计
 
@@ -311,6 +387,21 @@ Chat Completions 的结构化输出请求形状是 `response_format`，工具调
 
 网络和服务错误可自动重试。工具参数失败可让模型修复一次或多次。合同未满足进入 review/revision 流程。
 
+## 确定性检查
+
+LLM 自审不能单独作为质量门。`check_chapter[*]` 在 `review_chapter[*]` 前运行，用 Python 代码执行硬性检查。
+
+首版确定性检查包括：
+
+- 章节中文字数是否落在目标区间和容差内。
+- 场景中文字数总和是否匹配章节目标。
+- 必须出场人物名或别名是否出现在正文中。
+- 必须出现的信息点关键词是否出现。
+- 标题和正文输出格式是否符合 `title: ...\n---\n正文`。
+- 禁止覆盖目标文件。
+
+确定性检查失败时，不询问 LLM “是否通过”，直接进入重写或修订流程。LLM review 只负责一致性、文风、人物行为、伏笔推进、节奏、爽点等代码难以判断的问题。
+
 ## 状态库与日志
 
 每次运行创建目录：
@@ -358,6 +449,18 @@ SQLite 表至少包括：
 - 关联 LLM 调用。
 - 幂等键。
 
+`artifacts` 记录：
+
+- artifact 类型。
+- 当前版本。
+- 父版本。
+- 是否为讨论稿。
+- 是否已批准。
+- 关联审批点。
+- 创建来源节点或工具调用。
+
+审批点讨论过程中允许产生多个 artifact 版本。所有版本保留用于审计，但只有 `is_approved = true` 的版本会触发下游节点继续执行或失效重算。讨论稿版本不会让下游节点提前失效，因为下游节点在审批完成前不应运行。
+
 JSONL 事件包括：
 
 - `run_started`
@@ -384,6 +487,7 @@ JSONL 事件包括：
 - 工具集版本。
 - prompt 版本。
 - 关键任务参数。
+- 本轮审批或聊天消息 hash。
 
 恢复时：
 
@@ -420,6 +524,16 @@ TUI 使用 Textual，Rich 用于 Markdown、表格、日志和格式化展示。
 - AI 必须通过对应 tool 更新当前 artifact。
 - TUI 展示 diff 或版本摘要。
 - 用户批准后节点才完成。
+- 讨论中的每轮消息都会参与本轮 LLM 调用幂等键，避免用户换了修改意见时错误复用旧响应。
+
+`auto_approve` 可按审批类型配置：
+
+- `outline`
+- `chapter_plan`
+- `scene_plan`
+- `review_failure`
+
+默认全部关闭。即使开启自动批准，TUI 仍必须记录审批事件，并允许用户在运行中暂停。
 
 ## 输出策略
 
@@ -436,6 +550,15 @@ logs/<runtime_id>/outputs/chapters/<N>.txt
 ### writeback 模式
 
 从输入目录最大章节号后继续写 `N+1.txt`。写入前检查目标文件不存在。若文件已存在，暂停并要求用户处理，不能覆盖。
+
+写入必须使用原子写入：
+
+1. 先写入 `logs/<runtime_id>/outputs/tmp_<N>.txt` 或同文件系统临时文件。
+2. 写入完成后 flush 并关闭文件。
+3. 校验文件内容和格式。
+4. 使用 `os.replace` 移动到最终路径。
+
+writeback 模式不得直接打开最终章节文件写入，避免崩溃时损坏用户原始目录。
 
 输出章节格式：
 
@@ -475,6 +598,8 @@ title: 章节标题
 - `[tui]`
 - `[models.<profile>]`
 - `[tasks]`
+- `[approvals]`
+- `[cold_start]`
 
 示例结构：
 
@@ -489,6 +614,24 @@ output_mode = "output"
 # 是否把完整 prompt/response 保存到本地日志。
 # 开启后更利于断点续接和排查，但日志会包含小说正文。
 save_full_prompts = true
+
+[writing]
+# 中文字数容差比例。0.1 表示允许目标区间上下浮动 10%。
+word_count_tolerance_ratio = 0.1
+
+[approvals]
+# 默认关闭自动批准，避免用户错过关键规划节点。
+auto_approve_outline = false
+auto_approve_chapter_plan = false
+auto_approve_scene_plan = false
+auto_approve_review_failure = false
+
+[cold_start]
+# 默认关闭冷启动模式。开启后可先粗读历史章节、精读最近章节。
+enabled = false
+
+# 冷启动开启时，最近多少章按完整单章分析处理。
+recent_chapters_to_deep_analyze = 50
 
 [models.default]
 # 可选值：responses 或 chat_completions。
@@ -532,9 +675,12 @@ review = "default"
 
 - 章节解析测试：严格格式、连续章节、错误提示。
 - 配置加载测试：空值不传、任务映射回退、限流配置。
-- DAG 测试：依赖排序、节点失败/恢复、幂等跳过、下游失效。
+- DAG 测试：依赖排序、节点失败/恢复、幂等跳过、下游失效、自动审批。
 - LLM 适配测试：mock Responses 和 Chat Completions，分别验证 tool call 解析、usage 归一化和重试。
 - Tool 层测试：工具参数校验、产物版本化、重复调用幂等。
+- 检索测试：人物、伏笔、事件、世界观索引能定向拉取相关章节片段。
+- 确定性检查测试：字数、人名、关键词、格式和目标文件覆盖检查。
+- 原子写入测试：writeback 通过临时文件和 `os.replace` 完成，不直接写最终文件。
 - TUI 测试：关键 screen、审批流和消息提交。
 - 集成测试：使用 fake LLM 跑完整流程，不依赖真实 API。
 
@@ -548,6 +694,7 @@ review = "default"
 - `docs/configuration.md`：配置详解和多模型映射示例。
 - `docs/workflow.md`：DAG、审批点、断点续接。
 - `docs/llm-compatibility.md`：Responses 与 Chat Completions 的适配差异、兼容接口限制。
+- `docs/long-context.md`：长篇检索、状态衰减、区间摘要和冷启动策略。
 - `docs/development.md`：uv、ruff、mypy、pytest、提交流程。
 - `docs/superpowers/specs/2026-06-22-inklink-design.md`：本设计规格。
 
@@ -581,5 +728,11 @@ uv run pytest
 - 中间产物主要在 TUI 中编辑和审批，不默认做人类可手改文件。
 - 运行结束展示每模型/profile 的调用和 token 统计。
 - 审批点必须支持用户与 AI 讨论。
+- 审批点支持默认关闭的自动批准模式。
+- 长篇状态使用衰减、活跃度、结构化检索和区间摘要。
+- 新生成章节必须反哺当前 run 的故事状态。
+- 自审前必须执行确定性代码检查。
+- writeback 必须原子写入。
+- 冷启动模式预留且默认关闭。
 - 中文小说优先。
 - 面向完整产品开发，但实现必须按子系统和里程碑拆分。
