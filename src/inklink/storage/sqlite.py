@@ -5,7 +5,11 @@ from pathlib import Path
 from types import TracebackType
 from typing import cast
 
-from inklink.storage.schema import SCHEMA_SQL
+from inklink.storage.schema import SCHEMA_SQL, SCHEMA_VERSION
+
+
+class UnsupportedSchemaError(RuntimeError):
+    pass
 
 
 class StateStore:
@@ -19,7 +23,18 @@ class StateStore:
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
+            version = _schema_version(connection)
+            if version == 0 and _has_existing_tables(connection):
+                message = (
+                    "unsupported SQLite schema version 0; recreate the state database "
+                    "or run a future migration before opening it"
+                )
+                raise UnsupportedSchemaError(message)
+            if version != 0 and version != SCHEMA_VERSION:
+                raise UnsupportedSchemaError(f"unsupported SQLite schema version {version}")
             connection.executescript(SCHEMA_SQL)
+            if version == 0:
+                connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             connection.commit()
         except BaseException:
             connection.close()
@@ -87,3 +102,14 @@ class StateStore:
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, object]:
     return dict(row)
+
+
+def _schema_version(connection: sqlite3.Connection) -> int:
+    return cast(int, connection.execute("PRAGMA user_version").fetchone()[0])
+
+
+def _has_existing_tables(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
+    ).fetchone()
+    return row is not None

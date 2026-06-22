@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+SCHEMA_VERSION = 1
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
   runtime_id TEXT PRIMARY KEY,
