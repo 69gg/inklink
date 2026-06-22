@@ -24,10 +24,23 @@ def test_count_chinese_chars_ignores_unassigned_cjk_block_codepoints() -> None:
 def test_chapter_contract_rejects_invalid_ranges() -> None:
     with pytest.raises(ValidationError):
         ChapterContract(
-            chapter_number=0,
-            title="",
+            chapter_number=1,
+            title="第一章",
             min_chars=10,
             max_chars=1,
+            required_characters=[],
+            required_keywords=[],
+            scene_ids=[],
+        )
+
+
+def test_chapter_contract_rejects_blank_title() -> None:
+    with pytest.raises(ValidationError):
+        ChapterContract(
+            chapter_number=1,
+            title=" ",
+            min_chars=1,
+            max_chars=10,
             required_characters=[],
             required_keywords=[],
             scene_ids=[],
@@ -54,6 +67,43 @@ def test_chapter_contract_rejects_blank_required_terms() -> None:
             required_characters=["林青"],
             required_keywords=[""],
             scene_ids=[],
+        )
+
+
+def test_draft_chapter_rejects_invalid_identity() -> None:
+    with pytest.raises(ValidationError):
+        DraftChapter(chapter_number=0, title="第一章", body="正文")
+    with pytest.raises(ValidationError):
+        DraftChapter(chapter_number=1, title=" ", body="正文")
+
+
+def test_plot_thread_rejects_blank_identity_and_keywords() -> None:
+    with pytest.raises(ValidationError):
+        PlotThread(
+            thread_id=" ",
+            description="旧约定",
+            status=PlotThreadStatus.SEEDED,
+            source_chapter=1,
+            due_chapter=2,
+            related_keywords=["旧约定"],
+        )
+    with pytest.raises(ValidationError):
+        PlotThread(
+            thread_id="p1",
+            description=" ",
+            status=PlotThreadStatus.SEEDED,
+            source_chapter=1,
+            due_chapter=2,
+            related_keywords=["旧约定"],
+        )
+    with pytest.raises(ValidationError):
+        PlotThread(
+            thread_id="p1",
+            description="旧约定",
+            status=PlotThreadStatus.SEEDED,
+            source_chapter=1,
+            due_chapter=2,
+            related_keywords=[" "],
         )
 
 
