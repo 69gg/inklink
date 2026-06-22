@@ -41,6 +41,8 @@ class _ActiveRun:
     lock: ProjectLock
     store: StateStore
     event_log: JsonlEventLog
+    lock_released: bool = False
+    store_closed: bool = False
 
 
 class WorkflowService:
@@ -121,8 +123,8 @@ class WorkflowService:
         return StartRunCheck(allowed=True)
 
     def abandon_chapter(self, chapter_number: int) -> CommandResult:
-        self._validate_chapter_number(chapter_number)
         active_run = self._current_run()
+        self._validate_chapter_number(chapter_number, active_run.run.chapter_count)
         active_run.event_log.write(
             "chapter_abandon_requested",
             {
@@ -139,8 +141,8 @@ class WorkflowService:
         )
 
     def rewrite_chapter(self, chapter_number: int) -> CommandResult:
-        self._validate_chapter_number(chapter_number)
         active_run = self._current_run()
+        self._validate_chapter_number(chapter_number, active_run.run.chapter_count)
         active_run.event_log.write(
             "chapter_rewrite_requested",
             {
@@ -157,8 +159,8 @@ class WorkflowService:
         )
 
     def retry_node(self, node_id: str) -> CommandResult:
-        if not node_id.strip():
-            raise ValueError("node_id must not be empty")
+        if not node_id.strip() or node_id != node_id.strip():
+            raise ValueError("node_id must not be empty or contain leading/trailing whitespace")
         active_run = self._current_run()
         active_run.event_log.write(
             "node_retry_requested",
@@ -173,22 +175,27 @@ class WorkflowService:
         )
 
     def close(self) -> None:
-        active_runs = list(self._active_runs.values())
-        self._active_runs.clear()
-        self._runtime_id_by_input_dir.clear()
-        self._latest_runtime_id = None
         first_error: BaseException | None = None
-        for active_run in active_runs:
-            try:
-                active_run.lock.release()
-            except BaseException as exc:
-                if first_error is None:
-                    first_error = exc
-            try:
-                active_run.store.close()
-            except BaseException as exc:
-                if first_error is None:
-                    first_error = exc
+        for runtime_id, active_run in list(self._active_runs.items()):
+            if not active_run.lock_released:
+                try:
+                    active_run.lock.release()
+                    active_run.lock_released = True
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+            if not active_run.store_closed:
+                try:
+                    active_run.store.close()
+                    active_run.store_closed = True
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+            if active_run.lock_released and active_run.store_closed:
+                del self._active_runs[runtime_id]
+                del self._runtime_id_by_input_dir[active_run.run.input_dir]
+        if self._latest_runtime_id not in self._active_runs:
+            self._latest_runtime_id = next(reversed(self._active_runs), None)
         if first_error is not None:
             raise first_error
 
@@ -197,9 +204,13 @@ class WorkflowService:
             raise WorkflowServiceError("no active workflow run")
         return self._active_runs[self._latest_runtime_id]
 
-    def _validate_chapter_number(self, chapter_number: int) -> None:
+    def _validate_chapter_number(self, chapter_number: int, chapter_count: int) -> None:
         if chapter_number <= 0:
             raise ValueError("chapter_number must be positive")
+        if chapter_number > chapter_count:
+            raise ValueError(
+                f"chapter_number must be between 1 and {chapter_count}: {chapter_number}"
+            )
 
 
 __all__ = [

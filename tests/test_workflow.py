@@ -8,6 +8,9 @@ from typing import NoReturn, cast
 import pytest
 from pydantic import ValidationError
 
+from inklink.locks import ProjectLock
+from inklink.storage.events import JsonlEventLog
+from inklink.storage.sqlite import StateStore
 from inklink.workflow.executor import WorkflowExecutor
 from inklink.workflow.models import IdempotencyInputs, NodeState, WorkflowNode, idempotency_key
 from inklink.workflow.service import WorkflowService, WorkflowServiceError
@@ -38,6 +41,10 @@ def make_idempotency_inputs(
 
 def write_workflow_chapter(path: Path, title: str = "第一章", body: str = "正文") -> None:
     path.write_text(f"title: {title}\n---\n{body}", encoding="utf-8")
+
+
+def read_workflow_events(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def test_runs_nodes_in_dependency_order() -> None:
@@ -462,11 +469,10 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
             service.rewrite_chapter(-1)
         with pytest.raises(ValueError, match="node_id"):
             service.retry_node(" ")
+        with pytest.raises(ValueError, match="node_id"):
+            service.retry_node(" draft-1 ")
 
-    events = [
-        json.loads(line)
-        for line in (run.log_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    events = read_workflow_events(run.log_dir / "events.jsonl")
     assert [event["event_type"] for event in events] == [
         "run_started",
         "chapter_abandon_requested",
@@ -476,3 +482,106 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
     assert events[1]["payload"] == {"runtime_id": run.runtime_id, "chapter_number": 1}
     assert events[2]["payload"] == {"runtime_id": run.runtime_id, "chapter_number": 1}
     assert events[3]["payload"] == {"runtime_id": run.runtime_id, "node_id": "draft-1"}
+
+
+def test_service_chapter_commands_reject_out_of_range_without_events(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        run = service.start_run(project)
+
+        with pytest.raises(ValueError, match="chapter_number.*1"):
+            service.abandon_chapter(999)
+        with pytest.raises(ValueError, match="chapter_number.*1"):
+            service.rewrite_chapter(999)
+
+    events = read_workflow_events(run.log_dir / "events.jsonl")
+    assert [event["event_type"] for event in events] == ["run_started"]
+
+
+def test_service_close_failure_keeps_active_run_until_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+    service = WorkflowService(log_root=tmp_path / "logs")
+    service.start_run(project)
+    original_release = ProjectLock.release
+    original_close = StateStore.close
+    release_attempts = 0
+    store_close_calls = 0
+    fail_next_release = True
+
+    def flaky_release(self: ProjectLock) -> None:
+        nonlocal fail_next_release, release_attempts
+        release_attempts += 1
+        if fail_next_release:
+            fail_next_release = False
+            raise RuntimeError("release failed once")
+        original_release(self)
+
+    def record_close(self: StateStore) -> None:
+        nonlocal store_close_calls
+        store_close_calls += 1
+        original_close(self)
+
+    monkeypatch.setattr(ProjectLock, "release", flaky_release)
+    monkeypatch.setattr(StateStore, "close", record_close)
+
+    with pytest.raises(RuntimeError, match="release failed once"):
+        service.close()
+
+    assert service.can_start_run(project).allowed is False
+    assert release_attempts == 1
+    assert store_close_calls == 1
+
+    service.close()
+
+    assert service.can_start_run(project).allowed is True
+    assert release_attempts == 2
+    assert store_close_calls == 1
+    with WorkflowService(log_root=tmp_path / "next-logs") as next_service:
+        next_run = next_service.start_run(project)
+
+    assert next_run.chapter_count == 1
+
+
+def test_service_start_failure_from_event_log_write_cleans_up_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+    original_close = StateStore.close
+    store_close_calls = 0
+
+    def record_close(self: StateStore) -> None:
+        nonlocal store_close_calls
+        store_close_calls += 1
+        original_close(self)
+
+    def fail_write(
+        self: JsonlEventLog,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        raise RuntimeError(f"event write failed: {event_type}")
+
+    service = WorkflowService(log_root=tmp_path / "failed-logs")
+    with monkeypatch.context() as patcher:
+        patcher.setattr(StateStore, "close", record_close)
+        patcher.setattr(JsonlEventLog, "write", fail_write)
+        with pytest.raises(RuntimeError, match="event write failed: run_started"):
+            service.start_run(project)
+
+    assert store_close_calls == 1
+    service.close()
+    with WorkflowService(log_root=tmp_path / "valid-logs") as next_service:
+        run = next_service.start_run(project)
+
+    assert run.chapter_count == 1
