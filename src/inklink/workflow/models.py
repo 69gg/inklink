@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 from enum import StrEnum
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -16,7 +15,7 @@ class NodeState(StrEnum):
 
 
 class WorkflowNode(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(strict=True, extra="forbid")
 
     node_id: str = Field(min_length=1)
     node_type: str = Field(min_length=1)
@@ -47,47 +46,56 @@ class WorkflowNode(BaseModel):
         self,
         *,
         input_version: str,
-        profile: str = "default",
-        toolset_version: str = "default",
-        prompt_version: str = "default",
-        task_parameters_hash: str = "",
-        approval_messages_hash: str = "",
-        generation: int = 0,
+        profile: str,
+        toolset_version: str,
+        prompt_version: str,
+        task_parameters_hash: str,
+        approval_messages_hash: str,
+        generation: int,
     ) -> str:
         return idempotency_key(
-            node_type=self.node_type,
-            input_version=input_version,
-            profile=profile,
-            toolset_version=toolset_version,
-            prompt_version=prompt_version,
-            task_parameters_hash=task_parameters_hash,
-            approval_messages_hash=approval_messages_hash,
-            generation=generation,
+            IdempotencyInputs(
+                node_type=self.node_type,
+                input_version=input_version,
+                profile=profile,
+                toolset_version=toolset_version,
+                prompt_version=prompt_version,
+                task_parameters_hash=task_parameters_hash,
+                approval_messages_hash=approval_messages_hash,
+                generation=generation,
+            )
         )
 
 
-def idempotency_key(
-    *,
-    node_type: str,
-    input_version: str,
-    profile: str = "default",
-    toolset_version: str = "default",
-    prompt_version: str = "default",
-    task_parameters_hash: str = "",
-    approval_messages_hash: str = "",
-    generation: int = 0,
-    node_id: str | None = None,
-) -> str:
-    del node_id
-    payload: dict[str, Any] = {
-        "node_type": node_type,
-        "input_version": input_version,
-        "profile": profile,
-        "toolset_version": toolset_version,
-        "prompt_version": prompt_version,
-        "task_parameters_hash": task_parameters_hash,
-        "approval_messages_hash": approval_messages_hash,
-        "generation": generation,
-    }
+class IdempotencyInputs(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    node_type: str = Field(min_length=1)
+    input_version: str = Field(min_length=1)
+    profile: str = Field(min_length=1)
+    toolset_version: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    task_parameters_hash: str = Field(min_length=1)
+    approval_messages_hash: str = Field(min_length=1)
+    generation: int = Field(gt=0)
+
+    @field_validator(
+        "node_type",
+        "input_version",
+        "profile",
+        "toolset_version",
+        "prompt_version",
+        "task_parameters_hash",
+        "approval_messages_hash",
+    )
+    @classmethod
+    def validate_non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value must not be blank")
+        return value
+
+
+def idempotency_key(inputs: IdempotencyInputs) -> str:
+    payload = inputs.model_dump(mode="json")
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

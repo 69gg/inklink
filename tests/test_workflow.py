@@ -6,7 +6,30 @@ import pytest
 from pydantic import ValidationError
 
 from inklink.workflow.executor import WorkflowExecutor
-from inklink.workflow.models import NodeState, WorkflowNode, idempotency_key
+from inklink.workflow.models import IdempotencyInputs, NodeState, WorkflowNode, idempotency_key
+
+
+def make_idempotency_inputs(
+    *,
+    node_type: str = "draft",
+    input_version: str = "chapter-1",
+    profile: str = "default",
+    toolset_version: str = "tools-v1",
+    prompt_version: str = "prompt-v1",
+    task_parameters_hash: str = "params-a",
+    approval_messages_hash: str = "chat-a",
+    generation: int = 1,
+) -> IdempotencyInputs:
+    return IdempotencyInputs(
+        node_type=node_type,
+        input_version=input_version,
+        profile=profile,
+        toolset_version=toolset_version,
+        prompt_version=prompt_version,
+        task_parameters_hash=task_parameters_hash,
+        approval_messages_hash=approval_messages_hash,
+        generation=generation,
+    )
 
 
 def test_runs_nodes_in_dependency_order() -> None:
@@ -42,72 +65,129 @@ def test_runs_ready_branches_in_input_order() -> None:
 
 
 def test_generation_changes_idempotency_key() -> None:
-    first = idempotency_key(node_type="draft", input_version="chapter-1", generation=0)
-    regenerated = idempotency_key(node_type="draft", input_version="chapter-1", generation=1)
+    first = idempotency_key(make_idempotency_inputs(generation=1))
+    regenerated = idempotency_key(make_idempotency_inputs(generation=2))
 
     assert first != regenerated
 
 
 def test_approval_messages_hash_changes_idempotency_key() -> None:
-    first = idempotency_key(
-        node_type="draft",
-        input_version="chapter-1",
-        approval_messages_hash="chat-a",
-    )
-    second = idempotency_key(
-        node_type="draft",
-        input_version="chapter-1",
-        approval_messages_hash="chat-b",
-    )
+    first = idempotency_key(make_idempotency_inputs(approval_messages_hash="chat-a"))
+    second = idempotency_key(make_idempotency_inputs(approval_messages_hash="chat-b"))
 
     assert first != second
 
 
-@pytest.mark.parametrize(
-    ("field", "first_value", "second_value"),
-    [
-        ("task_parameters_hash", "params-a", "params-b"),
-        ("prompt_version", "prompt-v1", "prompt-v2"),
-        ("toolset_version", "tools-v1", "tools-v2"),
-        ("profile", "fast", "careful"),
-    ],
-)
-def test_design_inputs_change_idempotency_key(
-    field: str,
-    first_value: str,
-    second_value: str,
-) -> None:
-    base_kwargs: dict[str, object] = {
-        "node_type": "draft",
-        "input_version": "chapter-1",
-        "profile": "default",
-        "toolset_version": "tools-v1",
-        "prompt_version": "prompt-v1",
-        "task_parameters_hash": "params-a",
-    }
+def test_task_parameters_hash_changes_idempotency_key() -> None:
+    first = idempotency_key(make_idempotency_inputs(task_parameters_hash="params-a"))
+    second = idempotency_key(make_idempotency_inputs(task_parameters_hash="params-b"))
 
-    first_kwargs = base_kwargs | {field: first_value}
-    second_kwargs = base_kwargs | {field: second_value}
+    assert first != second
 
-    assert idempotency_key(**first_kwargs) != idempotency_key(**second_kwargs)
+
+def test_prompt_version_changes_idempotency_key() -> None:
+    first = idempotency_key(make_idempotency_inputs(prompt_version="prompt-v1"))
+    second = idempotency_key(make_idempotency_inputs(prompt_version="prompt-v2"))
+
+    assert first != second
+
+
+def test_toolset_version_changes_idempotency_key() -> None:
+    first = idempotency_key(make_idempotency_inputs(toolset_version="tools-v1"))
+    second = idempotency_key(make_idempotency_inputs(toolset_version="tools-v2"))
+
+    assert first != second
+
+
+def test_profile_changes_idempotency_key() -> None:
+    first = idempotency_key(make_idempotency_inputs(profile="fast"))
+    second = idempotency_key(make_idempotency_inputs(profile="careful"))
+
+    assert first != second
 
 
 def test_idempotency_key_is_stable_and_excludes_node_id() -> None:
-    first = idempotency_key(
-        node_type="draft",
+    first_node = WorkflowNode(node_id="a", node_type="draft")
+    second_node = WorkflowNode(node_id="b", node_type="draft")
+
+    first = first_node.idempotency_key(
         input_version="chapter-1",
-        node_id="a",
+        profile="default",
+        toolset_version="tools-v1",
+        prompt_version="prompt-v1",
         task_parameters_hash="params-a",
+        approval_messages_hash="chat-a",
+        generation=1,
     )
-    second = idempotency_key(
-        node_type="draft",
+    second = second_node.idempotency_key(
         input_version="chapter-1",
-        node_id="b",
+        profile="default",
+        toolset_version="tools-v1",
+        prompt_version="prompt-v1",
         task_parameters_hash="params-a",
+        approval_messages_hash="chat-a",
+        generation=1,
     )
 
     assert first == second
     assert len(first) == 64
+
+
+def test_workflow_node_idempotency_key_matches_input_model_key() -> None:
+    node = WorkflowNode(node_id="draft-1", node_type="draft")
+
+    node_key = node.idempotency_key(
+        input_version="chapter-1",
+        profile="default",
+        toolset_version="tools-v1",
+        prompt_version="prompt-v1",
+        task_parameters_hash="params-a",
+        approval_messages_hash="chat-a",
+        generation=1,
+    )
+
+    assert node_key == idempotency_key(make_idempotency_inputs(node_type="draft"))
+
+
+def test_idempotency_inputs_reject_missing_required_dimension() -> None:
+    with pytest.raises(ValidationError, match="profile"):
+        IdempotencyInputs.model_validate(
+            {
+                "node_type": "draft",
+                "input_version": "chapter-1",
+                "toolset_version": "tools-v1",
+                "prompt_version": "prompt-v1",
+                "task_parameters_hash": "params-a",
+                "approval_messages_hash": "chat-a",
+                "generation": 1,
+            }
+        )
+
+
+def test_idempotency_inputs_reject_wrong_generation_type() -> None:
+    with pytest.raises(ValidationError, match="generation"):
+        IdempotencyInputs.model_validate(
+            {
+                "node_type": "draft",
+                "input_version": "chapter-1",
+                "profile": "default",
+                "toolset_version": "tools-v1",
+                "prompt_version": "prompt-v1",
+                "task_parameters_hash": "params-a",
+                "approval_messages_hash": "chat-a",
+                "generation": "1",
+            }
+        )
+
+
+def test_idempotency_inputs_reject_non_positive_generation() -> None:
+    with pytest.raises(ValidationError, match="generation"):
+        make_idempotency_inputs(generation=0)
+
+
+def test_idempotency_inputs_reject_blank_profile() -> None:
+    with pytest.raises(ValidationError, match="value must not be blank"):
+        make_idempotency_inputs(profile=" ")
 
 
 def test_rejects_duplicate_node_id() -> None:
@@ -133,6 +213,19 @@ def test_rejects_dependency_cycle() -> None:
 
     with pytest.raises(ValueError, match="dependency cycle"):
         WorkflowExecutor([node_a, node_b])
+
+
+def test_executor_uses_dependency_snapshot_after_construction() -> None:
+    root = WorkflowNode(node_id="root", node_type="outline")
+    dependent = WorkflowNode(node_id="dependent", node_type="draft", depends_on=["root"])
+    seen: list[str] = []
+
+    executor = WorkflowExecutor([dependent, root])
+    dependent.depends_on.clear()
+
+    executor.run(lambda node: seen.append(node.node_id))
+
+    assert seen == ["root", "dependent"]
 
 
 def test_runner_failure_marks_failed_and_blocks_dependents() -> None:
@@ -176,10 +269,12 @@ def test_workflow_node_validation() -> None:
         WorkflowNode(node_id="draft", node_type=" ")
     with pytest.raises(ValidationError):
         WorkflowNode(node_id="draft", node_type="draft", attempt=-1)
+    with pytest.raises(ValidationError):
+        WorkflowNode.model_validate({"node_id": "draft", "node_type": "draft", "attempt": "1"})
     with pytest.raises(ValidationError, match="duplicate dependency"):
         WorkflowNode(node_id="draft", node_type="draft", depends_on=["a", "a"])
     with pytest.raises(ValidationError):
-        WorkflowNode(node_id="draft", node_type="draft", extra_field=True)
+        WorkflowNode.model_validate({"node_id": "draft", "node_type": "draft", "extra_field": True})
 
 
 def test_failed_dependency_blocks_dependents_on_later_run() -> None:
