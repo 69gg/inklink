@@ -25,8 +25,12 @@ class ProjectLock:
         return cls(project_dir=project_dir, run_id=run_id, lock_path=lock_path)
 
     def release(self) -> None:
-        if not self.lock_path.exists():
+        try:
+            current = self.lock_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
             return
-        current = self.lock_path.read_text(encoding="utf-8")
         if current == self.run_id:
-            self.lock_path.unlink()
+            try:
+                self.lock_path.unlink()
+            except FileNotFoundError:
+                return

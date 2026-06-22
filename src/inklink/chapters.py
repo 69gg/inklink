@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+_CHAPTER_FILE_RE = re.compile(r"^[1-9][0-9]*\.txt$")
 
 
 class ChapterFormatError(ValueError):
@@ -17,10 +20,7 @@ class Chapter:
 
 
 def load_chapters(directory: Path) -> list[Chapter]:
-    files = sorted(
-        (path for path in directory.glob("*.txt") if path.stem.isdecimal()),
-        key=lambda path: int(path.stem),
-    )
+    files = sorted(directory.glob("*.txt"), key=_chapter_sort_key)
     numbers = [int(path.stem) for path in files]
     expected = list(range(1, len(numbers) + 1))
     if numbers != expected:
@@ -32,17 +32,30 @@ def load_chapters(directory: Path) -> list[Chapter]:
     return chapters
 
 
+def _chapter_sort_key(path: Path) -> int:
+    if not _CHAPTER_FILE_RE.fullmatch(path.name):
+        raise ChapterFormatError(
+            f"{path.name}: filename must be an ASCII positive integer .txt file"
+        )
+    return int(path.stem)
+
+
 def _load_chapter(path: Path) -> Chapter:
-    raw = path.read_text(encoding="utf-8-sig")
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ChapterFormatError(f"{path.name}: invalid UTF-8 encoding") from exc
+
     text = raw.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
     if not lines or not lines[0].startswith("title:"):
         raise ChapterFormatError(f"{path.name}: first line must start with title:")
-    try:
-        separator_index = lines.index("---")
-    except ValueError as exc:
-        raise ChapterFormatError(f"{path.name}: missing separator ---") from exc
 
     title = lines[0].removeprefix("title:").strip()
-    body = "\n".join(lines[separator_index + 1 :])
+    if not title:
+        raise ChapterFormatError(f"{path.name}: title must not be empty")
+    if len(lines) < 2 or lines[1] != "---":
+        raise ChapterFormatError(f"{path.name}: second line must be separator ---")
+
+    body = "\n".join(lines[2:])
     return Chapter(number=int(path.stem), title=title, body=body, path=path)

@@ -13,3 +13,12 @@ def test_atomic_write_normalizes_newlines_to_lf(tmp_path: Path) -> None:
     target = tmp_path / "4.txt"
     atomic_write_text(target, "title: 四\r\n---\r正文")
     assert target.read_bytes() == b"title: \xe5\x9b\x9b\n---\n\xe6\xad\xa3\xe6\x96\x87"
+
+
+def test_atomic_write_does_not_reuse_existing_fixed_tmp_file(tmp_path: Path) -> None:
+    target = tmp_path / "5.txt"
+    fixed_tmp = tmp_path / ".5.txt.tmp"
+    fixed_tmp.write_text("do not touch", encoding="utf-8")
+    atomic_write_text(target, "title: 五\n---\n正文")
+    assert target.read_text(encoding="utf-8") == "title: 五\n---\n正文"
+    assert fixed_tmp.read_text(encoding="utf-8") == "do not touch"

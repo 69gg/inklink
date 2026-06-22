@@ -56,3 +56,34 @@ def test_rejects_non_standalone_separator(project_dir: Path) -> None:
     (project_dir / "1.txt").write_text("title: 第一章\n --- \n正文", encoding="utf-8")
     with pytest.raises(ChapterFormatError, match="separator"):
         load_chapters(project_dir)
+
+
+def test_rejects_separator_not_on_second_line(project_dir: Path) -> None:
+    project_dir.mkdir()
+    (project_dir / "1.txt").write_text(
+        "title: 第一章\nmetadata: invalid\n---\n正文",
+        encoding="utf-8",
+    )
+    with pytest.raises(ChapterFormatError, match="separator"):
+        load_chapters(project_dir)
+
+
+def test_rejects_empty_title(project_dir: Path) -> None:
+    project_dir.mkdir()
+    (project_dir / "1.txt").write_text("title: \n---\n正文", encoding="utf-8")
+    with pytest.raises(ChapterFormatError, match="title"):
+        load_chapters(project_dir)
+
+
+def test_rejects_leading_zero_filename(project_dir: Path) -> None:
+    project_dir.mkdir()
+    write_chapter(project_dir / "01.txt", "第一章", "正文")
+    with pytest.raises(ChapterFormatError, match="filename"):
+        load_chapters(project_dir)
+
+
+def test_wraps_invalid_utf8_as_chapter_format_error(project_dir: Path) -> None:
+    project_dir.mkdir()
+    (project_dir / "1.txt").write_bytes(b"title: \xff\n---\nbody")
+    with pytest.raises(ChapterFormatError, match="encoding"):
+        load_chapters(project_dir)
