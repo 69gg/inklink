@@ -9,15 +9,15 @@ WorkflowRunner = Callable[[WorkflowNode], None]
 
 class WorkflowExecutor:
     def __init__(self, nodes: list[WorkflowNode]) -> None:
-        self._nodes = nodes
+        self._nodes = tuple(nodes)
         self._nodes_by_id: dict[str, WorkflowNode] = {}
         self._dependencies_by_id: dict[str, tuple[str, ...]] = {}
-        for node in nodes:
+        for node in self._nodes:
             if node.node_id in self._nodes_by_id:
                 raise ValueError(f"duplicate node_id: {node.node_id}")
             self._nodes_by_id[node.node_id] = node
             self._dependencies_by_id[node.node_id] = tuple(node.depends_on)
-        for node in nodes:
+        for node in self._nodes:
             for dependency in self._dependencies_by_id[node.node_id]:
                 if dependency not in self._nodes_by_id:
                     raise ValueError(f"unknown dependency: {dependency}")

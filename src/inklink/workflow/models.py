@@ -15,7 +15,7 @@ class NodeState(StrEnum):
 
 
 class WorkflowNode(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="forbid", validate_assignment=True)
 
     node_id: str = Field(min_length=1)
     node_type: str = Field(min_length=1)
@@ -68,7 +68,7 @@ class WorkflowNode(BaseModel):
 
 
 class IdempotencyInputs(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="forbid", validate_assignment=True)
 
     node_type: str = Field(min_length=1)
     input_version: str = Field(min_length=1)

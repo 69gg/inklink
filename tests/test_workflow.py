@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import NoReturn
+from typing import NoReturn, cast
 
 import pytest
 from pydantic import ValidationError
@@ -228,6 +228,20 @@ def test_executor_uses_dependency_snapshot_after_construction() -> None:
     assert seen == ["root", "dependent"]
 
 
+def test_executor_uses_node_list_snapshot_after_construction() -> None:
+    root = WorkflowNode(node_id="root", node_type="outline")
+    dependent = WorkflowNode(node_id="dependent", node_type="draft", depends_on=["root"])
+    nodes = [dependent, root]
+    seen: list[str] = []
+
+    executor = WorkflowExecutor(nodes)
+    nodes.clear()
+
+    executor.run(lambda node: seen.append(node.node_id))
+
+    assert seen == ["root", "dependent"]
+
+
 def test_runner_failure_marks_failed_and_blocks_dependents() -> None:
     draft = WorkflowNode(node_id="draft", node_type="draft")
     check = WorkflowNode(node_id="check", node_type="check", depends_on=["draft"])
@@ -275,6 +289,22 @@ def test_workflow_node_validation() -> None:
         WorkflowNode(node_id="draft", node_type="draft", depends_on=["a", "a"])
     with pytest.raises(ValidationError):
         WorkflowNode.model_validate({"node_id": "draft", "node_type": "draft", "extra_field": True})
+
+
+def test_workflow_node_assignment_is_validated() -> None:
+    node = WorkflowNode(node_id="draft", node_type="draft")
+
+    with pytest.raises(ValidationError, match="attempt"):
+        node.attempt = cast(int, "1")
+
+
+def test_idempotency_inputs_assignment_is_validated() -> None:
+    inputs = make_idempotency_inputs()
+
+    with pytest.raises(ValidationError, match="generation"):
+        inputs.generation = cast(int, "1")
+    with pytest.raises(ValidationError, match="value must not be blank"):
+        inputs.profile = " "
 
 
 def test_failed_dependency_blocks_dependents_on_later_run() -> None:
