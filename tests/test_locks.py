@@ -55,6 +55,22 @@ def test_project_lock_blocks_second_run_when_marker_file_is_removed(tmp_path: Pa
         first.release()
 
 
+def test_project_lock_marker_replaces_symlink_without_touching_target(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("KEEP", encoding="utf-8")
+    (project / ".inklink.lock").symlink_to(victim)
+
+    lock = ProjectLock.acquire(project, "run-1")
+    try:
+        assert victim.read_text(encoding="utf-8") == "KEEP"
+        assert lock.lock_path.read_text(encoding="utf-8") == "run-1"
+        assert not lock.lock_path.is_symlink()
+    finally:
+        lock.release()
+
+
 def test_project_lock_release_does_not_unlink_lock_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from inklink.atomic import atomic_write_text
+
 
 class ProjectLockError(RuntimeError):
     pass
@@ -50,8 +52,4 @@ class ProjectLock:
 
 
 def _write_marker(lock_path: Path, run_id: str) -> None:
-    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(run_id)
-        handle.flush()
-        os.fsync(handle.fileno())
+    atomic_write_text(lock_path, run_id)

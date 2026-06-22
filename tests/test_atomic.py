@@ -1,6 +1,8 @@
 import stat
 from pathlib import Path
 
+import pytest
+
 from inklink.atomic import atomic_write_text
 
 
@@ -33,3 +35,22 @@ def test_atomic_write_preserves_existing_target_permissions(tmp_path: Path) -> N
     atomic_write_text(target, "title: 六\n---\n正文")
 
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_atomic_write_cleans_temp_file_when_permission_copy_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "7.txt"
+    target.write_text("old", encoding="utf-8")
+
+    def fail_fchmod(fd: int, mode: int) -> None:
+        raise OSError("fchmod failed")
+
+    monkeypatch.setattr("inklink.atomic.os.fchmod", fail_fchmod)
+
+    with pytest.raises(OSError, match="fchmod failed"):
+        atomic_write_text(target, "new")
+
+    assert target.read_text(encoding="utf-8") == "old"
+    assert list(tmp_path.glob(".7.txt.*.tmp")) == []
