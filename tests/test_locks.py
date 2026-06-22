@@ -41,3 +41,21 @@ def test_project_lock_release_missing_lock_is_noop(tmp_path: Path) -> None:
     first.lock_path.unlink()
     first.release()
     assert not first.lock_path.exists()
+
+
+def test_project_lock_release_does_not_unlink_lock_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    first = ProjectLock.acquire(project, "run-1")
+
+    def reject_unlink(self: Path, missing_ok: bool = False) -> None:
+        raise AssertionError(f"release must not unlink lock path: {self}")
+
+    monkeypatch.setattr(Path, "unlink", reject_unlink)
+    first.release()
+
+    second = ProjectLock.acquire(project, "run-2")
+    second.release()
