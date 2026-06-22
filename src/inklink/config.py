@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ApiKind = Literal["responses", "chat_completions"]
 
@@ -19,9 +19,9 @@ class RuntimeConfig(BaseModel):
 class WritingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    word_count_tolerance_ratio: float = 0.1
-    retrieval_token_budget: int | None = None
-    max_revision_rounds: int = 3
+    word_count_tolerance_ratio: float = Field(default=0.1, ge=0, le=1)
+    retrieval_token_budget: int | None = Field(default=None, gt=0)
+    max_revision_rounds: int = Field(default=3, ge=0)
 
 
 class ApprovalConfig(BaseModel):
@@ -37,7 +37,7 @@ class ColdStartConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    recent_chapters_to_deep_analyze: int = 50
+    recent_chapters_to_deep_analyze: int = Field(default=50, ge=0)
 
 
 class ModelProfile(BaseModel):
@@ -47,14 +47,14 @@ class ModelProfile(BaseModel):
     model: str
     api_key_env: str = "OPENAI_API_KEY"
     base_url: str | None = None
-    timeout_seconds: float | None = None
-    max_retries: int = 2
-    rpm: int | None = None
-    max_concurrency: int = 1
-    temperature: float | None = None
-    top_p: float | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0)
+    max_retries: int = Field(default=2, ge=0)
+    rpm: int | None = Field(default=None, gt=0)
+    max_concurrency: int = Field(default=1, gt=0)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, ge=0, le=1)
     reasoning_effort: str | None = None
-    max_completion_tokens: int | None = None
+    max_completion_tokens: int | None = Field(default=None, gt=0)
 
 
 class AppConfig(BaseModel):
@@ -66,6 +66,16 @@ class AppConfig(BaseModel):
     cold_start: ColdStartConfig = Field(default_factory=ColdStartConfig)
     models: dict[str, ModelProfile]
     tasks: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_profile_references(self) -> Self:
+        if "default" not in self.models:
+            raise ValueError("models.default must be configured")
+        missing = sorted({profile for profile in self.tasks.values() if profile not in self.models})
+        if missing:
+            names = ", ".join(missing)
+            raise ValueError(f"task profiles are not configured: {names}")
+        return self
 
     def profile_for_task(self, task: str) -> str:
         return self.tasks.get(task, "default")
@@ -89,13 +99,29 @@ def load_config(path: Path) -> AppConfig:
     return AppConfig.model_validate(_normalize_blanks(data))
 
 
-def request_options_for_profile(profile: ModelProfile) -> dict[str, object]:
+def client_options_for_profile(profile: ModelProfile) -> dict[str, object]:
     optional: dict[str, object | None] = {
         "base_url": profile.base_url,
         "timeout": profile.timeout_seconds,
+        "max_retries": profile.max_retries,
+    }
+    return {key: value for key, value in optional.items() if value is not None}
+
+
+def request_options_for_profile(profile: ModelProfile) -> dict[str, object]:
+    optional: dict[str, object | None] = {
         "temperature": profile.temperature,
         "top_p": profile.top_p,
-        "reasoning_effort": profile.reasoning_effort,
-        "max_completion_tokens": profile.max_completion_tokens,
     }
-    return {key: value for key, value in optional.items() if _none_if_blank(value) is not None}
+    options = {key: value for key, value in optional.items() if value is not None}
+    if profile.api == "responses":
+        if profile.reasoning_effort is not None:
+            options["reasoning"] = {"effort": profile.reasoning_effort}
+        if profile.max_completion_tokens is not None:
+            options["max_output_tokens"] = profile.max_completion_tokens
+    else:
+        if profile.reasoning_effort is not None:
+            options["reasoning_effort"] = profile.reasoning_effort
+        if profile.max_completion_tokens is not None:
+            options["max_completion_tokens"] = profile.max_completion_tokens
+    return options
