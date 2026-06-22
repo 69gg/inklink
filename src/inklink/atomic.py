@@ -7,12 +7,15 @@ from pathlib import Path
 
 def atomic_write_text(target: Path, content: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    existing_mode = target.stat().st_mode if target.exists() else None
     fd, tmp_name = tempfile.mkstemp(
         dir=target.parent,
         prefix=f".{target.name}.",
         suffix=".tmp",
         text=True,
     )
+    if existing_mode is not None:
+        os.fchmod(fd, existing_mode)
     tmp = Path(tmp_name)
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     try:

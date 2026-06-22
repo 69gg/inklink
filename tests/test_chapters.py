@@ -33,6 +33,19 @@ def test_rejects_gap_in_numbering(project_dir: Path) -> None:
         load_chapters(project_dir)
 
 
+def test_rejects_empty_chapter_directory(project_dir: Path) -> None:
+    project_dir.mkdir()
+    with pytest.raises(ChapterFormatError, match="at least one"):
+        load_chapters(project_dir)
+
+
+def test_rejects_chapter_path_that_is_not_a_file(project_dir: Path) -> None:
+    project_dir.mkdir()
+    (project_dir / "1.txt").mkdir()
+    with pytest.raises(ChapterFormatError, match="file"):
+        load_chapters(project_dir)
+
+
 def test_loads_utf8_bom_and_normalizes_crlf(project_dir: Path) -> None:
     project_dir.mkdir()
     (project_dir / "1.txt").write_text(

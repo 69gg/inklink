@@ -21,6 +21,8 @@ class Chapter:
 
 def load_chapters(directory: Path) -> list[Chapter]:
     files = sorted(directory.glob("*.txt"), key=_chapter_sort_key)
+    if not files:
+        raise ChapterFormatError("chapter directory must contain at least one chapter file")
     numbers = [int(path.stem) for path in files]
     expected = list(range(1, len(numbers) + 1))
     if numbers != expected:
@@ -41,6 +43,8 @@ def _chapter_sort_key(path: Path) -> int:
 
 
 def _load_chapter(path: Path) -> Chapter:
+    if not path.is_file():
+        raise ChapterFormatError(f"{path.name}: chapter path must be a file")
     try:
         raw = path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
