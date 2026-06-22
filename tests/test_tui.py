@@ -29,3 +29,17 @@ async def test_tui_f1_shows_dashboard_screen() -> None:
         assert isinstance(pilot.app.screen, DashboardScreen)
         assert pilot.app.screen.id == "dashboard"
         assert pilot.app.screen.title == "工作台"
+
+
+async def test_tui_f1_does_not_push_duplicate_dashboard_screen() -> None:
+    app = InklinkApp()
+
+    async with app.run_test() as pilot:
+        await pilot.press("f1")
+        dashboard_screen = pilot.app.screen
+        dashboard_stack_size = len(pilot.app.screen_stack)
+
+        await pilot.press("f1")
+
+        assert pilot.app.screen is dashboard_screen
+        assert len(pilot.app.screen_stack) == dashboard_stack_size
