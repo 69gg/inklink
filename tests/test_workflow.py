@@ -242,6 +242,20 @@ def test_executor_uses_node_list_snapshot_after_construction() -> None:
     assert seen == ["root", "dependent"]
 
 
+def test_executor_uses_node_identity_snapshot_after_construction() -> None:
+    root = WorkflowNode(node_id="root", node_type="outline")
+    dependent = WorkflowNode(node_id="dependent", node_type="draft", depends_on=["root"])
+    seen: list[str] = []
+
+    executor = WorkflowExecutor([dependent, root])
+    dependent.node_id = "renamed"
+
+    executor.run(lambda node: seen.append(node.node_id))
+
+    assert seen == ["root", "renamed"]
+    assert executor.state_for("dependent") is NodeState.COMPLETED
+
+
 def test_runner_failure_marks_failed_and_blocks_dependents() -> None:
     draft = WorkflowNode(node_id="draft", node_type="draft")
     check = WorkflowNode(node_id="check", node_type="check", depends_on=["draft"])
