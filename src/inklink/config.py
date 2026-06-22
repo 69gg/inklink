@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+ApiKind = Literal["responses", "chat_completions"]
+
+
+class RuntimeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    output_mode: Literal["output", "writeback"] = "output"
+    save_full_prompts: bool = True
+
+
+class WritingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    word_count_tolerance_ratio: float = 0.1
+    retrieval_token_budget: int | None = None
+    max_revision_rounds: int = 3
+
+
+class ApprovalConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    auto_approve_outline: bool = False
+    auto_approve_chapter_plan: bool = False
+    auto_approve_scene_plan: bool = False
+    auto_approve_review_failure: bool = False
+
+
+class ColdStartConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    recent_chapters_to_deep_analyze: int = 50
+
+
+class ModelProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api: ApiKind = "responses"
+    model: str
+    api_key_env: str = "OPENAI_API_KEY"
+    base_url: str | None = None
+    timeout_seconds: float | None = None
+    max_retries: int = 2
+    rpm: int | None = None
+    max_concurrency: int = 1
+    temperature: float | None = None
+    top_p: float | None = None
+    reasoning_effort: str | None = None
+    max_completion_tokens: int | None = None
+
+
+class AppConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
+    writing: WritingConfig = Field(default_factory=WritingConfig)
+    approvals: ApprovalConfig = Field(default_factory=ApprovalConfig)
+    cold_start: ColdStartConfig = Field(default_factory=ColdStartConfig)
+    models: dict[str, ModelProfile]
+    tasks: dict[str, str] = Field(default_factory=dict)
+
+    def profile_for_task(self, task: str) -> str:
+        return self.tasks.get(task, "default")
+
+
+def _none_if_blank(value: Any) -> Any:
+    return None if value == "" else value
+
+
+def _normalize_blanks(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {key: _normalize_blanks(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_normalize_blanks(value) for value in data]
+    return _none_if_blank(data)
+
+
+def load_config(path: Path) -> AppConfig:
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    return AppConfig.model_validate(_normalize_blanks(data))
+
+
+def request_options_for_profile(profile: ModelProfile) -> dict[str, object]:
+    optional: dict[str, object | None] = {
+        "base_url": profile.base_url,
+        "timeout": profile.timeout_seconds,
+        "temperature": profile.temperature,
+        "top_p": profile.top_p,
+        "reasoning_effort": profile.reasoning_effort,
+        "max_completion_tokens": profile.max_completion_tokens,
+    }
+    return {key: value for key, value in optional.items() if _none_if_blank(value) is not None}
