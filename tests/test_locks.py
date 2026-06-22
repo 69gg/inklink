@@ -43,6 +43,18 @@ def test_project_lock_release_missing_lock_is_noop(tmp_path: Path) -> None:
     assert not first.lock_path.exists()
 
 
+def test_project_lock_blocks_second_run_when_marker_file_is_removed(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    first = ProjectLock.acquire(project, "run-1")
+    first.lock_path.unlink()
+    try:
+        with pytest.raises(ProjectLockError):
+            ProjectLock.acquire(project, "run-2")
+    finally:
+        first.release()
+
+
 def test_project_lock_release_does_not_unlink_lock_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
