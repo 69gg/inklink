@@ -28,22 +28,24 @@ Inklink 从 `config.toml` 读取配置，示例见仓库根目录的 `config.tom
 
 ## writing
 
+当前配置层已支持以下字段的解析、默认值和校验。检索预算裁剪、端到端自动修订和修订失败审批执行仍属于后续 workflow/LLM 集成目标。
+
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `writing.word_count_tolerance_ratio` | float，`0..1` | `0.1` | 中文字数容差比例。当前中文字数统计只计入 Python `unicodedata` 识别到的 CJK 统一表意文字及扩展区；标点、空格、换行、阿拉伯数字、拉丁字母和未分配码位不计入。 |
-| `writing.retrieval_token_budget` | 正整数或空字符串 | `None` | 留空关闭检索预算裁剪；填写正整数后，所有检索场景按确定性优先级裁剪注入上下文。 |
-| `writing.max_revision_rounds` | 非负整数 | `3` | 单章自动修订最多轮数。达到上限仍失败时需要审批或按配置自动批准失败。 |
+| `writing.retrieval_token_budget` | 正整数或空字符串 | `None` | 配置字段已支持；留空表示不启用预算值。完整检索、prompt 注入和按确定性优先级裁剪上下文属于后续 workflow/LLM 集成目标。 |
+| `writing.max_revision_rounds` | 非负整数 | `3` | 配置字段已支持；用于后续端到端自动修订流程的单章最大修订轮数。当前尚未接通完整自动修订执行。 |
 
 ## approvals
 
-所有自动批准默认关闭，避免跳过关键创作节点。
+当前配置层已支持自动批准字段，且默认全部关闭，避免后续端到端审批执行接入后跳过关键创作节点。完整审批 UI、审批聊天和自动批准执行仍属于后续 workflow/TUI 集成目标。
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `approvals.auto_approve_outline` | bool | `false` | 是否自动批准大纲。 |
-| `approvals.auto_approve_chapter_plan` | bool | `false` | 是否自动批准章节计划。 |
-| `approvals.auto_approve_scene_plan` | bool | `false` | 是否自动批准场景计划。 |
-| `approvals.auto_approve_review_failure` | bool | `false` | 谨慎开启：当确定性检查或自审修订达到上限仍未通过时，自动批准可能让质量不足或不满足合同的章节进入输出流程。 |
+| `approvals.auto_approve_outline` | bool | `false` | 配置字段已支持；后续审批执行接入后用于自动批准大纲。 |
+| `approvals.auto_approve_chapter_plan` | bool | `false` | 配置字段已支持；后续审批执行接入后用于自动批准章节计划。 |
+| `approvals.auto_approve_scene_plan` | bool | `false` | 配置字段已支持；后续审批执行接入后用于自动批准场景计划。 |
+| `approvals.auto_approve_review_failure` | bool | `false` | 配置字段已支持，但谨慎开启：后续审批执行接入后，若确定性检查或自审修订达到上限仍未通过，自动批准可能让质量不足或不满足合同的章节进入输出流程。 |
 
 ## cold_start
 
