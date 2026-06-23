@@ -2,6 +2,7 @@ import asyncio
 
 from textual.widgets import Button, Input, Static, TextArea
 
+from inklink.storage.sqlite import StateStore
 from inklink.tui.app import InklinkApp
 from inklink.tui.screens import (
     DashboardScreen,
@@ -10,8 +11,10 @@ from inklink.tui.screens import (
     RuntimeLogScreen,
     SetupWorkspace,
     StatsScreen,
+    _format_approval_workspace,
     _format_node_tree,
 )
+from inklink.tui.snapshot import RunSnapshot
 from inklink.workflow.pipeline import PipelineProgress, PipelineSummary, RunStats
 from inklink.workflow.service import WorkflowService
 
@@ -217,6 +220,285 @@ async def test_tui_approval_message_button_records_message(tmp_path) -> None:
     assert messages[0]["content"] == "请强化冲突"
 
 
+async def test_tui_approvals_prefill_waiting_artifact(tmp_path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(novel)
+
+    with StateStore.open(run.log_dir / "state.sqlite") as store:
+        version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"items": []},
+            is_draft=True,
+            approval_id="outline",
+        )
+        store.create_or_update_approval(
+            approval_id="outline",
+            approval_type="outline",
+            status="waiting",
+            auto_approve=False,
+            artifact_id="outline",
+            artifact_version=version,
+        )
+        store.update_run_status(run.runtime_id, "waiting_approval")
+
+    app = InklinkApp(input_dir=novel, log_root=log_root)
+    app.latest_runtime_id = run.runtime_id
+
+    async with app.run_test() as pilot:
+        await pilot.press("f4")
+        await pilot.pause()
+
+        screen = pilot.app.screen
+        assert isinstance(screen, RuntimeApprovalsScreen)
+        assert screen.query_one("#approval-id", Input).value == "outline"
+        assert screen.query_one("#approval-artifact-id", Input).value == "outline"
+        assert screen.query_one("#approval-artifact-type", Input).value == "outline"
+        assert screen.query_one("#approval-artifact-version", Input).value == str(version)
+
+
+async def test_tui_waiting_approval_does_not_overwrite_user_input(tmp_path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(novel)
+
+    with StateStore.open(run.log_dir / "state.sqlite") as store:
+        outline_version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"items": []},
+            is_draft=True,
+            approval_id="outline",
+        )
+        store.create_or_update_approval(
+            approval_id="outline",
+            approval_type="outline",
+            status="waiting",
+            auto_approve=False,
+            artifact_id="outline",
+            artifact_version=outline_version,
+        )
+        chapter_version = store.upsert_artifact(
+            artifact_id="chapter_plan",
+            artifact_type="chapter_plan",
+            payload=[],
+            is_draft=True,
+            approval_id="chapter_plan",
+        )
+        store.create_or_update_approval(
+            approval_id="chapter_plan",
+            approval_type="chapter_plan",
+            status="waiting",
+            auto_approve=False,
+            artifact_id="chapter_plan",
+            artifact_version=chapter_version,
+        )
+        store.update_run_status(run.runtime_id, "waiting_approval")
+
+    app = InklinkApp(input_dir=novel, log_root=log_root)
+    app.latest_runtime_id = run.runtime_id
+
+    async with app.run_test() as pilot:
+        await pilot.press("f4")
+        await pilot.pause()
+        message_input = pilot.app.screen.query_one("#approval-message", Input)
+        message_input.value = "我正在输入，不要覆盖"
+        pilot.app.screen.query_one("#approval-id", Input).value = "outline"
+        message_input.focus()
+
+        pilot.app._handle_pipeline_progress(
+            PipelineProgress(
+                message="等待用户审批章节计划",
+                runtime_id=run.runtime_id,
+                status="waiting",
+                waiting_approval_id="chapter_plan",
+            )
+        )
+        await pilot.pause()
+
+        assert (
+            pilot.app.screen.query_one("#approval-message", Input).value == "我正在输入，不要覆盖"
+        )
+        assert pilot.app.screen.query_one("#approval-id", Input).value == "outline"
+
+
+async def test_tui_approval_prefill_clears_stale_fields(tmp_path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(novel)
+
+    with StateStore.open(run.log_dir / "state.sqlite") as store:
+        version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"items": []},
+            is_draft=True,
+            approval_id="outline",
+        )
+        store.create_or_update_approval(
+            approval_id="outline",
+            approval_type="outline",
+            status="waiting",
+            auto_approve=False,
+            artifact_id="outline",
+            artifact_version=version,
+        )
+        store.update_run_status(run.runtime_id, "waiting_approval")
+
+    app = InklinkApp(input_dir=novel, log_root=log_root)
+    app.latest_runtime_id = run.runtime_id
+
+    async with app.run_test() as pilot:
+        await pilot.press("f4")
+        await pilot.pause()
+        screen = pilot.app.screen
+        assert isinstance(screen, RuntimeApprovalsScreen)
+        assert screen.query_one("#approval-artifact-version", Input).value == str(version)
+
+        screen.refresh_from_snapshot(
+            RunSnapshot(
+                runtime_id=run.runtime_id,
+                log_root=log_root,
+                status="waiting_approval",
+                approvals=[
+                    {
+                        "approval_id": "review_failure:3",
+                        "approval_type": "review_failure",
+                        "status": "waiting",
+                    }
+                ],
+            ),
+            prefill=True,
+        )
+
+        assert screen.query_one("#approval-id", Input).value == "review_failure:3"
+        assert screen.query_one("#approval-artifact-id", Input).value == ""
+        assert screen.query_one("#approval-artifact-type", Input).value == "review_failure"
+        assert screen.query_one("#approval-artifact-version", Input).value == ""
+        assert screen.query_one("#chapter-number", Input).value == "3"
+
+
+async def test_tui_chat_update_syncs_new_artifact_version(monkeypatch, tmp_path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[models.default]
+api = "responses"
+model = "fake-model"
+api_key = "sk-test"
+""",
+        encoding="utf-8",
+    )
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(novel)
+
+    with StateStore.open(run.log_dir / "state.sqlite") as store:
+        version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"items": []},
+            is_draft=True,
+            approval_id="outline",
+        )
+        store.create_or_update_approval(
+            approval_id="outline",
+            approval_type="outline",
+            status="waiting",
+            auto_approve=False,
+            artifact_id="outline",
+            artifact_version=version,
+        )
+        store.update_run_status(run.runtime_id, "waiting_approval")
+
+    class FakePipeline:
+        def __init__(self, llm: object) -> None:
+            self.llm = llm
+
+        async def update_artifact_with_chat(self, **kwargs: object) -> int:
+            return 2
+
+    class FakeLLM:
+        def __init__(self, config: object, api_keys: object) -> None:
+            self.config = config
+            self.api_keys = api_keys
+
+    monkeypatch.setattr("inklink.tui.screens.InklinkPipeline", FakePipeline)
+    monkeypatch.setattr("inklink.tui.screens.OpenAIToolLLM", FakeLLM)
+
+    app = InklinkApp(input_dir=novel, config=config, log_root=log_root)
+    app.latest_runtime_id = run.runtime_id
+
+    async with app.run_test() as pilot:
+        await pilot.press("f4")
+        await pilot.pause()
+        screen = pilot.app.screen
+        assert isinstance(screen, RuntimeApprovalsScreen)
+        screen.query_one("#approval-message", Input).value = "请调整冲突"
+
+        await screen.chat_update_artifact()
+
+        assert screen.query_one("#approval-artifact-version", Input).value == "2"
+        assert screen.query_one("#approval-message", Input).value == ""
+        status = screen.query_one("#approval-command-status", Static).render()
+        assert "outline@2" in str(status)
+
+
+def test_tui_snapshot_reports_stale_progress(tmp_path) -> None:
+    snapshot = RunSnapshot(
+        runtime_id="runtime",
+        log_root=tmp_path / "logs",
+        latest_progress=PipelineProgress(
+            message="请求模型",
+            llm_task_type="drafting",
+        ),
+        pipeline_running=True,
+        last_progress_age_seconds=65,
+        events=[
+            {
+                "timestamp": "2026-06-23T00:00:00+00:00",
+                "event_type": "llm_request",
+                "payload": {"task_type": "drafting"},
+            }
+        ],
+    )
+
+    assert snapshot.stale_hint is not None
+    assert "65 秒" in snapshot.stale_hint
+    assert "drafting" in snapshot.stale_hint
+
+
+def test_tui_approval_workspace_shows_state_error(tmp_path) -> None:
+    text = _format_approval_workspace(
+        RunSnapshot(
+            runtime_id="runtime",
+            log_root=tmp_path / "logs",
+            status="读取失败",
+            state_error="state.sqlite missing",
+        )
+    )
+
+    assert "状态库暂不可读" in text
+    assert "state.sqlite missing" in text
+
+
 async def test_tui_ctrl_r_starts_pipeline_when_input_dir_is_set(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
@@ -263,10 +545,11 @@ api_key_env = "MISSING_FAKE_KEY"
         await pilot.press("ctrl+r")
         await pilot.pause()
 
-        status = pilot.app.screen.query_one("#setup-workspace", Static).render()
+        assert isinstance(pilot.app.screen, DashboardScreen)
+        status = pilot.app.screen.query_one("#dashboard-status", Static).render()
         latest_runtime_id = pilot.app.latest_runtime_id
 
-    assert "运行完成" in str(status)
+    assert "运行结束: completed" in str(status)
     assert captured["options"].input_dir == novel
     assert captured["api_keys"] == {"default": "sk-from-config"}
     assert latest_runtime_id == "runtime"
@@ -328,29 +611,33 @@ api_key_env = "MISSING_FAKE_KEY"
 
     async with app.run_test() as pilot:
         await pilot.press("ctrl+r")
+        await pilot.pause()
 
-        immediate_summary = pilot.app.screen.query_one("#setup-run-summary", Static).render()
-        run_button = pilot.app.screen.query_one("#run-pipeline", Button)
+        assert isinstance(pilot.app.screen, DashboardScreen)
+        immediate_summary = pilot.app.screen.query_one("#dashboard-status", Static).render()
 
         assert "未开始" not in str(immediate_summary)
-        assert "运行中" in str(immediate_summary) or "后台任务已提交" in str(immediate_summary)
-        assert run_button.disabled is True
+        assert (
+            "运行中" in str(immediate_summary)
+            or "后台任务已提交" in str(immediate_summary)
+            or "测试阶段" in str(immediate_summary)
+        )
 
         await asyncio.wait_for(started.wait(), timeout=1)
         await pilot.pause()
 
-        live_status = pilot.app.screen.query_one("#setup-workspace", Static).render()
-        live_summary = pilot.app.screen.query_one("#setup-run-summary", Static).render()
+        live_status = pilot.app.screen.query_one("#dashboard-status", Static).render()
+        live_summary = pilot.app.screen.query_one("#dashboard-nodes", Static).render()
 
         assert "测试阶段" in str(live_status)
-        assert "test-node" in str(live_summary)
+        assert "test-node" in str(live_status) or "test-node" in str(live_summary)
 
         release.set()
         await pilot.pause()
 
-        final_status = pilot.app.screen.query_one("#setup-workspace", Static).render()
+        final_status = pilot.app.screen.query_one("#dashboard-status", Static).render()
 
-    assert "运行完成" in str(final_status)
+    assert "运行结束: completed" in str(final_status)
 
 
 async def test_tui_ctrl_r_uses_generation_controls(monkeypatch, tmp_path) -> None:
@@ -412,11 +699,14 @@ api_key_env = "MISSING_FAKE_KEY"
         await pilot.press("ctrl+r")
         await pilot.pause()
 
-        status = pilot.app.screen.query_one("#setup-workspace", Static).render()
+        assert isinstance(pilot.app.screen, RuntimeApprovalsScreen)
+        status = pilot.app.screen.query_one("#approvals-workspace", Static).render()
+        approval_id = pilot.app.screen.query_one("#approval-id", Input).value
         latest_runtime_id = pilot.app.latest_runtime_id
 
     options = captured["options"]
     assert "runtime-from-controls" in str(status)
+    assert approval_id == "outline"
     assert options.input_dir == novel
     assert options.config_path == config
     assert options.log_root == log_root

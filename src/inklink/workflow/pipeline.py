@@ -283,6 +283,16 @@ class PipelineProgress:
     runtime_id: str | None = None
     node_id: str | None = None
     chapter_number: int | None = None
+    phase: str | None = None
+    status: str | None = None
+    step_index: int | None = None
+    step_total: int | None = None
+    chapter_done: int | None = None
+    chapter_total: int | None = None
+    llm_task_type: str | None = None
+    llm_profile: str | None = None
+    waiting_approval_id: str | None = None
+    severity: str = "info"
 
 
 PipelineProgressCallback = Callable[[PipelineProgress], None]
@@ -325,6 +335,16 @@ class InklinkPipeline:
         runtime_id: str | None = None,
         node_id: str | None = None,
         chapter_number: int | None = None,
+        phase: str | None = None,
+        status: str | None = None,
+        step_index: int | None = None,
+        step_total: int | None = None,
+        chapter_done: int | None = None,
+        chapter_total: int | None = None,
+        llm_task_type: str | None = None,
+        llm_profile: str | None = None,
+        waiting_approval_id: str | None = None,
+        severity: str = "info",
     ) -> None:
         if self._progress_callback is None:
             return
@@ -334,6 +354,16 @@ class InklinkPipeline:
                 runtime_id=runtime_id,
                 node_id=node_id,
                 chapter_number=chapter_number,
+                phase=phase,
+                status=status,
+                step_index=step_index,
+                step_total=step_total,
+                chapter_done=chapter_done,
+                chapter_total=chapter_total,
+                llm_task_type=llm_task_type,
+                llm_profile=llm_profile,
+                waiting_approval_id=waiting_approval_id,
+                severity=severity,
             )
         )
 
@@ -424,20 +454,35 @@ class InklinkPipeline:
                 store.close()
 
     async def run(self, options: GenerationOptions) -> PipelineSummary:
-        self._progress("读取配置与运行参数", runtime_id=options.runtime_id)
+        self._progress(
+            "读取配置与运行参数",
+            runtime_id=options.runtime_id,
+            phase="load",
+            status="running",
+        )
         initial_config = load_config(options.config_path) if options.runtime_id is None else None
         stats = RunStats()
         output_files: list[Path] = []
         generated_chapters: list[int] = []
 
         with WorkflowService(log_root=options.log_root) as service:
-            self._progress("创建或恢复运行", runtime_id=options.runtime_id)
+            self._progress(
+                "创建或恢复运行",
+                runtime_id=options.runtime_id,
+                phase="load",
+                status="running",
+            )
             run = (
                 service.resume_run(options.runtime_id)
                 if options.runtime_id is not None
                 else service.start_run(_required_input_dir(options))
             )
-            self._progress("运行已启动，正在准备状态库", runtime_id=run.runtime_id)
+            self._progress(
+                "运行已启动，正在准备状态库",
+                runtime_id=run.runtime_id,
+                phase="load",
+                status="running",
+            )
             event_log = JsonlEventLog(run.log_dir / "events.jsonl")
             store = StateStore.open(run.log_dir / "state.sqlite")
             try:
@@ -452,7 +497,12 @@ class InklinkPipeline:
                 max_revision_rounds = settings.max_revision_rounds
                 effective_auto_approve = settings.auto_approve or options.auto_approve
                 if options.runtime_id is not None:
-                    self._progress("检查可续接的未完成节点", runtime_id=run.runtime_id)
+                    self._progress(
+                        "检查可续接的未完成节点",
+                        runtime_id=run.runtime_id,
+                        phase="load",
+                        status="running",
+                    )
                     pending_summary = _resume_pending_write_output_summary(
                         store=store,
                         runtime_id=run.runtime_id,
@@ -464,7 +514,12 @@ class InklinkPipeline:
                         return pending_summary
                     completed_summary = _resume_completed_summary(store)
                     if completed_summary is not None:
-                        self._progress("已复用完成的运行摘要", runtime_id=run.runtime_id)
+                        self._progress(
+                            "已复用完成的运行摘要",
+                            runtime_id=run.runtime_id,
+                            phase="output",
+                            status="reused",
+                        )
                         event_log.write(
                             "run_completed_reused",
                             {
@@ -473,7 +528,13 @@ class InklinkPipeline:
                             },
                         )
                         return completed_summary
-                self._progress("读取章节文件", runtime_id=run.runtime_id, node_id="load_project")
+                self._progress(
+                    "读取章节文件",
+                    runtime_id=run.runtime_id,
+                    node_id="load_project",
+                    phase="load",
+                    status="running",
+                )
                 chapters = load_chapters(run.input_dir)
                 artifacts_dir = run.log_dir / "artifacts"
                 artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -498,6 +559,10 @@ class InklinkPipeline:
                 self._progress(
                     f"分析已有章节，共 {len(chapters)} 章",
                     runtime_id=run.runtime_id,
+                    phase="analysis",
+                    status="running",
+                    chapter_done=0,
+                    chapter_total=len(chapters),
                 )
                 analyses = await self._analyze_chapters(
                     chapters=chapters,
@@ -507,7 +572,12 @@ class InklinkPipeline:
                     stats=stats,
                     event_log=event_log,
                 )
-                self._progress("检查是否需要升级浅层分析", runtime_id=run.runtime_id)
+                self._progress(
+                    "检查是否需要升级浅层分析",
+                    runtime_id=run.runtime_id,
+                    phase="analysis",
+                    status="running",
+                )
                 analyses = await self._upgrade_shallow_analyses_if_needed(
                     chapters=chapters,
                     analyses=analyses,
@@ -517,7 +587,12 @@ class InklinkPipeline:
                     stats=stats,
                     event_log=event_log,
                 )
-                self._progress("写入结构化检索索引", runtime_id=run.runtime_id)
+                self._progress(
+                    "写入结构化检索索引",
+                    runtime_id=run.runtime_id,
+                    phase="analysis",
+                    status="running",
+                )
                 _write_json(
                     artifacts_dir / "chapter_analyses.json",
                     [analysis.model_dump(mode="json") for analysis in analyses],
@@ -533,7 +608,12 @@ class InklinkPipeline:
                     is_approved=True,
                 )
 
-                self._progress("生成区间摘要", runtime_id=run.runtime_id)
+                self._progress(
+                    "生成区间摘要",
+                    runtime_id=run.runtime_id,
+                    phase="range_summary",
+                    status="running",
+                )
                 range_summaries = await self._summarize_ranges(
                     chapters=chapters,
                     analyses=analyses,
@@ -547,6 +627,8 @@ class InklinkPipeline:
                     "合并全书状态",
                     runtime_id=run.runtime_id,
                     node_id="merge_story_state",
+                    phase="story_state",
+                    status="running",
                 )
                 store.upsert_node(
                     node_id="merge_story_state",
@@ -599,7 +681,12 @@ class InklinkPipeline:
                     ],
                     output_version="story_state",
                 )
-                self._progress("组装检索上下文", runtime_id=run.runtime_id)
+                self._progress(
+                    "组装检索上下文",
+                    runtime_id=run.runtime_id,
+                    phase="story_state",
+                    status="running",
+                )
                 retrieval_context = _retrieval_context(
                     analyses=analyses,
                     story_state=story_state,
@@ -614,6 +701,8 @@ class InklinkPipeline:
                         "生成可讨论大纲",
                         runtime_id=run.runtime_id,
                         node_id="plan_outline",
+                        phase="outline",
+                        status="running",
                     )
                     store.upsert_node(
                         node_id="plan_outline",
@@ -685,6 +774,9 @@ class InklinkPipeline:
                             "等待用户审批大纲",
                             runtime_id=run.runtime_id,
                             node_id="approve_outline",
+                            phase="outline",
+                            status="waiting",
+                            waiting_approval_id="outline",
                         )
                         return _pause_for_approval(
                             runtime_id=run.runtime_id,
@@ -723,6 +815,8 @@ class InklinkPipeline:
                         "生成章节计划",
                         runtime_id=run.runtime_id,
                         node_id="plan_chapters",
+                        phase="chapter_plan",
+                        status="running",
                     )
                     store.upsert_node(
                         node_id="plan_chapters",
@@ -814,6 +908,9 @@ class InklinkPipeline:
                             "等待用户审批章节计划",
                             runtime_id=run.runtime_id,
                             node_id="approve_chapter_plan",
+                            phase="chapter_plan",
+                            status="waiting",
+                            waiting_approval_id="chapter_plan",
                         )
                         return _pause_for_approval(
                             runtime_id=run.runtime_id,
@@ -849,6 +946,8 @@ class InklinkPipeline:
                         runtime_id=run.runtime_id,
                         node_id=f"chapter-{contract.chapter_number}",
                         chapter_number=contract.chapter_number,
+                        phase="scene_plan",
+                        status="running",
                     )
                     generation = store.get_chapter_generation(contract.chapter_number)
                     skipped_output = _completed_chapter_output(
@@ -890,6 +989,8 @@ class InklinkPipeline:
                             runtime_id=run.runtime_id,
                             node_id=plan_scenes_node_id,
                             chapter_number=contract.chapter_number,
+                            phase="scene_plan",
+                            status="running",
                         )
                         store.upsert_node(
                             node_id=plan_scenes_node_id,
@@ -959,6 +1060,9 @@ class InklinkPipeline:
                                 runtime_id=run.runtime_id,
                                 node_id=f"approve_scene_plan:{contract.chapter_number}",
                                 chapter_number=contract.chapter_number,
+                                phase="scene_plan",
+                                status="waiting",
+                                waiting_approval_id=scene_plan_id,
                             )
                             store.create_or_update_approval(
                                 approval_id=scene_plan_id,
@@ -1013,6 +1117,8 @@ class InklinkPipeline:
                             runtime_id=run.runtime_id,
                             node_id=f"check_chapter:{contract.chapter_number}",
                             chapter_number=contract.chapter_number,
+                            phase="review",
+                            status="running",
                         )
                         draft = await self._review_and_revise(
                             config=config,
@@ -1038,6 +1144,10 @@ class InklinkPipeline:
                             runtime_id=run.runtime_id,
                             node_id=f"review_failure:{exc.chapter_number}",
                             chapter_number=contract.chapter_number,
+                            phase="review",
+                            status="waiting",
+                            waiting_approval_id=f"review_failure:{exc.chapter_number}",
+                            severity="warning",
                         )
                         return _pause_for_approval(
                             runtime_id=run.runtime_id,
@@ -1053,6 +1163,8 @@ class InklinkPipeline:
                         runtime_id=run.runtime_id,
                         node_id=integrate_node_id,
                         chapter_number=draft.chapter_number,
+                        phase="output",
+                        status="running",
                     )
                     store.upsert_node(
                         node_id=integrate_node_id,
@@ -1120,6 +1232,8 @@ class InklinkPipeline:
                             runtime_id=run.runtime_id,
                             node_id=f"write_output:{draft.chapter_number}",
                             chapter_number=draft.chapter_number,
+                            phase="output",
+                            status="running",
                         )
                         output_file = _write_chapter_output(
                             store=store,
@@ -1136,6 +1250,10 @@ class InklinkPipeline:
                             runtime_id=run.runtime_id,
                             node_id=f"write_output:{draft.chapter_number}",
                             chapter_number=draft.chapter_number,
+                            phase="output",
+                            status="waiting",
+                            waiting_approval_id=f"write_output:{draft.chapter_number}",
+                            severity="warning",
                         )
                         return _pause_for_write_output(
                             runtime_id=run.runtime_id,
@@ -1166,7 +1284,12 @@ class InklinkPipeline:
                         },
                     )
 
-                self._progress("整理运行摘要", runtime_id=run.runtime_id)
+                self._progress(
+                    "整理运行摘要",
+                    runtime_id=run.runtime_id,
+                    phase="output",
+                    status="running",
+                )
                 summary = PipelineSummary(
                     runtime_id=run.runtime_id,
                     log_dir=run.log_dir,
@@ -1184,7 +1307,12 @@ class InklinkPipeline:
                 )
                 event_log.write("run_completed", summary.model_dump(mode="json"))
                 store.update_run_status(run.runtime_id, "completed")
-                self._progress("运行完成", runtime_id=run.runtime_id)
+                self._progress(
+                    "运行完成",
+                    runtime_id=run.runtime_id,
+                    phase="output",
+                    status="completed",
+                )
                 return summary
             finally:
                 store.close()
@@ -1200,10 +1328,22 @@ class InklinkPipeline:
         event_log: JsonlEventLog,
     ) -> list[ChapterAnalysis]:
         deep_start = _deep_analysis_start(chapters, config)
+        total = len(chapters)
+        completed = 0
 
         async def analyze_one(chapter: Chapter) -> ChapterAnalysis:
             depth = "deep" if chapter.number >= deep_start else "shallow"
             node_id = f"analyze_chapter:{chapter.number}"
+            self._progress(
+                f"第 {chapter.number} 章：开始{depth}分析",
+                runtime_id=runtime_id,
+                node_id=node_id,
+                chapter_number=chapter.number,
+                phase="analysis",
+                status="running",
+                chapter_done=completed,
+                chapter_total=total,
+            )
             cached_artifact = store.get_latest_artifact(
                 f"chapter_analysis:{chapter.number}",
                 approved_only=True,
@@ -1269,7 +1409,25 @@ class InklinkPipeline:
             )
             return cast(ChapterAnalysis, analysis)
 
-        analyses = await asyncio.gather(*(analyze_one(chapter) for chapter in chapters))
+        async def analyze_and_report(chapter: Chapter) -> ChapterAnalysis:
+            nonlocal completed
+            analysis = await analyze_one(chapter)
+            completed += 1
+            self._progress(
+                f"已有章节分析进度: {completed}/{total}",
+                runtime_id=runtime_id,
+                node_id=f"analyze_chapter:{chapter.number}",
+                chapter_number=chapter.number,
+                phase="analysis",
+                status="running" if completed < total else "completed",
+                step_index=completed,
+                step_total=total,
+                chapter_done=completed,
+                chapter_total=total,
+            )
+            return analysis
+
+        analyses = await asyncio.gather(*(analyze_and_report(chapter) for chapter in chapters))
         return sorted(analyses, key=lambda analysis: analysis.chapter_number)
 
     async def _upgrade_shallow_analyses_if_needed(
@@ -1353,11 +1511,22 @@ class InklinkPipeline:
     ) -> list[RangeSummary]:
         analyses_by_number = {analysis.chapter_number: analysis for analysis in analyses}
         summaries: list[RangeSummary] = []
-        for chapter_group in _chunk_chapters(chapters, config.writing.range_summary_chapter_span):
+        chapter_groups = _chunk_chapters(chapters, config.writing.range_summary_chapter_span)
+        total = len(chapter_groups)
+        for index, chapter_group in enumerate(chapter_groups, start=1):
             start = chapter_group[0].number
             end = chapter_group[-1].number
             node_id = f"summarize_range:{start}-{end}"
             artifact_id = f"range_summary:{start}-{end}"
+            self._progress(
+                f"区间摘要进度: {index}/{total}（第 {start}-{end} 章）",
+                runtime_id=runtime_id,
+                node_id=node_id,
+                phase="range_summary",
+                status="running",
+                step_index=index,
+                step_total=total,
+            )
             cached_artifact = store.get_latest_artifact(artifact_id, approved_only=True)
             if cached_artifact is not None:
                 summaries.append(RangeSummary.model_validate(cached_artifact["payload"]))
@@ -1528,12 +1697,23 @@ class InklinkPipeline:
     ) -> _DraftPackage:
         scene_drafts: list[SceneDraft] = []
         prior_scene_text = ""
-        for scene in scene_plan.scenes:
+        total_scenes = len(scene_plan.scenes)
+        for scene_index, scene in enumerate(scene_plan.scenes, start=1):
             node_id = f"draft_scene:{contract.chapter_number}:{scene.scene_id}"
             depends_on = (
                 [f"draft_scene:{contract.chapter_number}:{scene_drafts[-1].scene_id}"]
                 if scene_drafts
                 else [f"approve_scene_plan:{contract.chapter_number}"]
+            )
+            self._progress(
+                f"第 {contract.chapter_number} 章：生成场景 {scene_index}/{total_scenes}",
+                runtime_id=runtime_id,
+                node_id=node_id,
+                chapter_number=contract.chapter_number,
+                phase="draft",
+                status="running",
+                step_index=scene_index,
+                step_total=total_scenes,
             )
             store.upsert_node(
                 node_id=node_id,
@@ -1899,6 +2079,8 @@ class InklinkPipeline:
         approval_messages_hash: str = "no-approval-messages",
     ) -> Any:
         profile_name = config.profile_for_task(task_type)
+        phase = _phase_for_task_type(task_type)
+        chapter_number = _chapter_number_from_call_payload(input_payload)
         payload_text = json.dumps(input_payload, ensure_ascii=False, sort_keys=True)
         profile = config.models[profile_name]
         key = _call_idempotency_key(
@@ -1914,6 +2096,15 @@ class InklinkPipeline:
             tool_name=tool_spec.name,
         )
         if cached_payload is not None:
+            self._progress(
+                f"复用模型结果: {task_type}",
+                runtime_id=runtime_id,
+                chapter_number=chapter_number,
+                phase=phase,
+                status="reused",
+                llm_task_type=task_type,
+                llm_profile=profile_name,
+            )
             event_log.write(
                 "llm_response_reused",
                 {
@@ -1954,6 +2145,15 @@ class InklinkPipeline:
                 "generation": generation,
             },
         )
+        self._progress(
+            f"请求模型: {task_type}（{profile_name}/{profile.model}）",
+            runtime_id=runtime_id,
+            chapter_number=chapter_number,
+            phase=phase,
+            status="running",
+            llm_task_type=task_type,
+            llm_profile=profile_name,
+        )
         try:
             result = await self._llm.call_tool(
                 task_type=task_type,
@@ -1965,6 +2165,16 @@ class InklinkPipeline:
             )
         except Exception as exc:
             store.fail_llm_call(call_id=llm_call_id, error=str(exc))
+            self._progress(
+                f"模型请求失败: {task_type}: {exc}",
+                runtime_id=runtime_id,
+                chapter_number=chapter_number,
+                phase=phase,
+                status="failed",
+                llm_task_type=task_type,
+                llm_profile=profile_name,
+                severity="error",
+            )
             raise
         validated = tool_spec.model.model_validate(result.payload)
         stats.add(result)
@@ -2000,6 +2210,15 @@ class InklinkPipeline:
                 "usage": result.usage.model_dump(mode="json", exclude_none=True),
             },
         )
+        self._progress(
+            f"模型完成: {task_type}",
+            runtime_id=runtime_id,
+            chapter_number=chapter_number,
+            phase=phase,
+            status="completed",
+            llm_task_type=task_type,
+            llm_profile=profile_name,
+        )
         event_log.write(
             "tool_result",
             {
@@ -2020,6 +2239,37 @@ def _add_optional_tokens(current: int | None, value: int | None) -> int | None:
     if value is None:
         return current
     return (current or 0) + value
+
+
+def _phase_for_task_type(task_type: str) -> str | None:
+    return {
+        "chapter_extraction": "analysis",
+        "range_summary": "range_summary",
+        "story_merge": "story_state",
+        "outline_planning": "outline",
+        "outline_chat": "outline",
+        "chapter_planning": "chapter_plan",
+        "chapter_plan_chat": "chapter_plan",
+        "scene_planning": "scene_plan",
+        "scene_plan_chat": "scene_plan",
+        "drafting": "draft",
+        "review": "review",
+        "revision": "review",
+    }.get(task_type)
+
+
+def _chapter_number_from_call_payload(payload: Mapping[str, object]) -> int | None:
+    direct = payload.get("chapter_number")
+    if isinstance(direct, int) and not isinstance(direct, bool):
+        return direct
+    for key in ("chapter_contract", "draft", "scene_contract"):
+        nested = payload.get(key)
+        if not isinstance(nested, dict):
+            continue
+        value = nested.get("chapter_number")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
 
 
 def _sum_usage_buckets(buckets: Iterable[UsageBucket]) -> UsageBucket:
