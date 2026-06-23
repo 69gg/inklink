@@ -42,13 +42,13 @@ class SetupWorkspace(Widget):
         super().__init__(id="setup-workspace-container")
         self._input_dir = input_dir
         self._config = config
+        self._status = "待启动"
 
     def compose(self) -> ComposeResult:
-        input_dir_text = str(self._input_dir) if self._input_dir is not None else "未选择"
         config_text = str(self._config) if self._config is not None else "config.toml"
 
         yield Static(
-            f"设置工作台\n输入目录: {input_dir_text}\n配置: {config_text}\n状态: 待启动",
+            self.workspace_text,
             id="setup-workspace",
         )
         with Horizontal(classes="workspace-row"):
@@ -65,6 +65,17 @@ class SetupWorkspace(Widget):
             with Vertical(classes="workspace-panel"):
                 yield Static("审批区", classes="workspace-title")
                 yield Static("暂无待审批事项。")
+
+    @property
+    def workspace_text(self) -> str:
+        input_dir_text = str(self._input_dir) if self._input_dir is not None else "未选择"
+        config_text = str(self._config) if self._config is not None else "config.toml"
+        return f"设置工作台\n输入目录: {input_dir_text}\n配置: {config_text}\n状态: {self._status}"
+
+    def set_status(self, status: str) -> None:
+        self._status = status
+        workspace = self.query_one("#setup-workspace", Static)
+        workspace.update(self.workspace_text)
 
 
 class DashboardScreen(Screen[None]):

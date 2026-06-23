@@ -15,6 +15,13 @@ uv run inklink version
 uv run inklink run ./novel --config config.toml
 ```
 
+直接执行端到端 pipeline：
+
+```bash
+uv run inklink run ./novel --config config.toml --execute \
+  --chapter-count 1 --min-chars 800 --max-chars 1800 --auto-approve
+```
+
 ## 验证命令
 
 提交前运行完整验证：
@@ -46,7 +53,7 @@ uv run pytest tests/test_config.py -q
 | `src/inklink/storage/*` | SQLite schema/store 和 JSONL 审计事件。 |
 | `src/inklink/llm/*` | provider-independent 类型、OpenAI Responses/Chat 适配器、usage 归一化、profile 限流。 |
 | `src/inklink/tools/registry.py` | 内部 function tool schema 与 dispatch 注册。 |
-| `src/inklink/workflow/*` | DAG 节点模型、幂等键、执行器和 workflow service primitive。 |
+| `src/inklink/workflow/*` | DAG 节点模型、幂等键、执行器、workflow service 和端到端 pipeline。 |
 | `src/inklink/tui/*` | Textual TUI shell 和屏幕。 |
 | `tests/*` | 与上述模块对应的 focused tests。 |
 

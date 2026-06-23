@@ -23,22 +23,22 @@ Inklink 从 `config.toml` 读取配置，示例见仓库根目录的 `config.tom
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `runtime.output_mode` | `"output"` 或 `"writeback"` | `"output"` | `output` 表示输出到独立目录，不修改原章节目录；`writeback` 是写回输入目录的目标模式，后续集成会基于原子写入避免半写入。 |
+| `runtime.output_mode` | `"output"` 或 `"writeback"` | `"output"` | `output` 表示输出到 `logs/<runtime_id>/outputs/chapters/`，不修改原章节目录；`writeback` 写回输入目录的目标章节号，若目标文件已存在会拒绝覆盖。 |
 | `runtime.save_full_prompts` | bool | `true` | 是否保存完整 prompt。开启后便于断点续接和排查，但日志可能包含小说正文、设定和审批聊天内容。 |
 
 ## writing
 
-当前配置层已支持以下字段的解析、默认值和校验。检索预算裁剪、端到端自动修订和修订失败审批执行仍属于后续 workflow/LLM 集成目标。
+当前 pipeline 已使用字数区间、自动修订轮数和轻量检索预算裁剪。检索预算当前以字符数近似 token 预算，用确定性优先级裁剪注入上下文；后续可替换为真实 tokenizer 与更完整检索层。
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `writing.word_count_tolerance_ratio` | float，`0..1` | `0.1` | 中文字数容差比例。当前中文字数统计只计入 Python `unicodedata` 识别到的 CJK 统一表意文字及扩展区；标点、空格、换行、阿拉伯数字、拉丁字母和未分配码位不计入。 |
-| `writing.retrieval_token_budget` | 正整数或空字符串 | `None` | 配置字段已支持；留空表示不启用预算值。完整检索、prompt 注入和按确定性优先级裁剪上下文属于后续 workflow/LLM 集成目标。 |
-| `writing.max_revision_rounds` | 非负整数 | `3` | 配置字段已支持；用于后续端到端自动修订流程的单章最大修订轮数。当前尚未接通完整自动修订执行。 |
+| `writing.retrieval_token_budget` | 正整数或空字符串 | `None` | 留空不裁剪；填写正整数后，pipeline 会按确定性优先级裁剪故事状态、伏笔、人物、世界观和近期章节摘要。当前预算单位是字符近似值。 |
+| `writing.max_revision_rounds` | 非负整数 | `3` | 当前 pipeline 使用该值控制单章最大自动修订轮数。确定性检查失败会直接进入 revision，检查通过后才运行 LLM review。 |
 
 ## approvals
 
-当前配置层已支持自动批准字段，且默认全部关闭，避免后续端到端审批执行接入后跳过关键创作节点。完整审批 UI、审批聊天和自动批准执行仍属于后续 workflow/TUI 集成目标。
+当前 CLI/TUI pipeline 支持运行时 `--auto-approve` / `Ctrl+R` 自动接受规划节点并记录审批事件。以下配置字段已支持解析和校验；更细粒度的按审批类型自动批准、审批 UI 和审批聊天仍属于后续 workflow/TUI 集成目标。
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |

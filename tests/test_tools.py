@@ -4,6 +4,18 @@ import pytest
 
 from inklink.tools.registry import ToolRegistry
 
+EXPECTED_TOOL_NAMES = {
+    "record_chapter_analysis",
+    "record_range_summary",
+    "merge_story_state",
+    "propose_outline",
+    "propose_chapter_plan",
+    "propose_scene_plan",
+    "submit_scene_draft",
+    "submit_chapter_review",
+    "submit_revision",
+}
+
 
 def test_default_registry_exposes_chat_function_schema() -> None:
     registry = ToolRegistry.default()
@@ -21,6 +33,27 @@ def test_default_registry_exposes_chat_function_schema() -> None:
     assert properties["chapter_number"]["type"] == "integer"
     assert properties["summary"]["type"] == "string"
     assert set(parameters["required"]) == {"chapter_number", "summary"}
+
+
+def test_default_registry_exposes_all_pipeline_tools_with_strict_schemas() -> None:
+    registry = ToolRegistry.default()
+
+    chat_schemas = registry.chat_tool_schemas()
+    responses_schemas = registry.responses_tool_schemas()
+
+    assert {schema["function"]["name"] for schema in chat_schemas} == EXPECTED_TOOL_NAMES
+    assert {schema["name"] for schema in responses_schemas} == EXPECTED_TOOL_NAMES
+    for schema in chat_schemas:
+        function = schema["function"]
+        parameters = function["parameters"]
+        assert function["strict"] is True
+        assert parameters["type"] == "object"
+        assert parameters["additionalProperties"] is False
+    for schema in responses_schemas:
+        parameters = schema["parameters"]
+        assert schema["strict"] is True
+        assert parameters["type"] == "object"
+        assert parameters["additionalProperties"] is False
 
 
 def test_default_registry_exposes_responses_function_schema() -> None:
