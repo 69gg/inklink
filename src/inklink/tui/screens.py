@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, Static, TextArea
 
-from inklink.config import load_config
+from inklink.config import api_key_for_profile, load_config
 from inklink.workflow.pipeline import GenerationOptions, InklinkPipeline, OpenAIToolLLM
 
 if TYPE_CHECKING:
@@ -613,7 +613,7 @@ class RuntimeApprovalsScreen(Screen[None]):
                 raise ValueError("审批消息不能为空")
             app_config = load_config(self._config)
             api_keys = {
-                name: os.environ.get(profile.api_key_env)
+                name: api_key_for_profile(profile, os.environ)
                 for name, profile in app_config.models.items()
             }
             version = await InklinkPipeline(

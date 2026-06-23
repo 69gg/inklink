@@ -7,7 +7,7 @@ from typing import Annotated
 import typer
 
 from inklink import __version__
-from inklink.config import load_config
+from inklink.config import api_key_for_profile, load_config
 from inklink.tui.app import InklinkApp
 from inklink.workflow.pipeline import (
     GenerationOptions,
@@ -122,7 +122,8 @@ async def _run_pipeline(
     config_path = _config_path_for_pipeline(config=config, log_root=log_root, runtime_id=runtime_id)
     app_config = load_config(config_path)
     api_keys = {
-        name: os.environ.get(profile.api_key_env) for name, profile in app_config.models.items()
+        name: api_key_for_profile(profile, os.environ)
+        for name, profile in app_config.models.items()
     }
     llm = OpenAIToolLLM(app_config, api_keys)
     return await InklinkPipeline(llm=llm).run(
@@ -423,7 +424,8 @@ async def _chat_update_artifact(
 ) -> int:
     app_config = load_config(config)
     api_keys = {
-        name: os.environ.get(profile.api_key_env) for name, profile in app_config.models.items()
+        name: api_key_for_profile(profile, os.environ)
+        for name, profile in app_config.models.items()
     }
     llm = OpenAIToolLLM(app_config, api_keys)
     return await InklinkPipeline(llm=llm).update_artifact_with_chat(

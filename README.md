@@ -28,7 +28,7 @@ uv run inklink version
 cp config.toml.example config.toml
 ```
 
-真实 API key 建议放在环境变量中，不要直接写入 `config.toml`。在配置文件里用 `api_key_env` 指向对应环境变量。
+API key 可以直接写在 `config.toml` 的 `api_key` 字段里；留空时会按 `api_key_env` 读取环境变量。真实 key 不应提交到 git，仓库已忽略本地 `config.toml`。
 
 ## 准备章节
 

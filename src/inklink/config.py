@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -49,6 +50,7 @@ class ModelProfile(BaseModel):
 
     api: ApiKind = "responses"
     model: str
+    api_key: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
     base_url: str | None = None
     timeout_seconds: float | None = Field(default=None, gt=0)
@@ -110,6 +112,15 @@ def client_options_for_profile(profile: ModelProfile) -> dict[str, object]:
         "max_retries": profile.max_retries,
     }
     return {key: value for key, value in optional.items() if value is not None}
+
+
+def api_key_for_profile(
+    profile: ModelProfile,
+    environment: Mapping[str, str | None],
+) -> str | None:
+    if profile.api_key:
+        return profile.api_key
+    return environment.get(profile.api_key_env)
 
 
 def request_options_for_profile(profile: ModelProfile) -> dict[str, object]:

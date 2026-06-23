@@ -1,5 +1,5 @@
 # 真实 config.toml 不应提交到 git。
-# 复制本文件为 config.toml 后再填写自己的密钥环境变量和模型配置。
+# 复制本文件为 config.toml 后再填写自己的模型和密钥配置。
 
 [runtime]
 # output 不修改原目录；writeback 会写回输入目录后续章节。
@@ -50,7 +50,11 @@ api = "responses"
 # 模型名由用户配置，不硬编码。
 model = "gpt-5.5"
 
-# 从环境变量读取 API key，避免把密钥写入 config.toml。
+# 可选：直接在 config.toml 写明文 API key。留空则读取 api_key_env。
+# 明文 key 方便本地单机使用，但请确认 config.toml 已被 git 忽略。
+api_key = ""
+
+# api_key 留空时，从这个环境变量读取 API key。
 api_key_env = "OPENAI_API_KEY"
 
 # 留空使用 SDK 默认地址；兼容服务可填写自定义 /v1 base_url。

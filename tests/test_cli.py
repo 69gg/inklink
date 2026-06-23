@@ -110,6 +110,7 @@ def test_cli_run_execute_invokes_pipeline(monkeypatch: MonkeyPatch, tmp_path: Pa
 [models.default]
 api = "responses"
 model = "fake-model"
+api_key = "sk-from-config"
 api_key_env = "MISSING_FAKE_KEY"
 """,
         encoding="utf-8",
@@ -152,6 +153,7 @@ api_key_env = "MISSING_FAKE_KEY"
     assert options.runtime_id is None
     assert options.max_revision_rounds == 4
     assert options.notes == "保留悬念"
+    assert captured["api_keys"] == {"default": "sk-from-config"}
     assert "usage_total" in result.output
     assert "usage_by_profile" in result.output
     assert "usage_by_model" in result.output

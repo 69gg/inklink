@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from inklink.config import (
     AppConfig,
+    api_key_for_profile,
     client_options_for_profile,
     load_config,
     request_options_for_profile,
@@ -47,6 +48,42 @@ temperature = ""
     profile = load_config(path).models["default"]
     assert "base_url" not in client_options_for_profile(profile)
     assert "temperature" not in request_options_for_profile(profile)
+
+
+def test_profile_api_key_can_be_read_from_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[models.default]
+api = "responses"
+model = "gpt-test"
+api_key = "sk-from-config"
+api_key_env = "OPENAI_API_KEY"
+""",
+        encoding="utf-8",
+    )
+    profile = load_config(path).models["default"]
+
+    assert profile.api_key == "sk-from-config"
+    assert api_key_for_profile(profile, {"OPENAI_API_KEY": "sk-from-env"}) == "sk-from-config"
+
+
+def test_profile_api_key_falls_back_to_environment(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[models.default]
+api = "responses"
+model = "gpt-test"
+api_key = ""
+api_key_env = "OPENAI_API_KEY"
+""",
+        encoding="utf-8",
+    )
+    profile = load_config(path).models["default"]
+
+    assert profile.api_key is None
+    assert api_key_for_profile(profile, {"OPENAI_API_KEY": "sk-from-env"}) == "sk-from-env"
 
 
 def test_load_config_normalizes_blank_optional_values(tmp_path: Path) -> None:

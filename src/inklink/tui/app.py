@@ -9,7 +9,7 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import Button, Footer, Header
 
-from inklink.config import load_config
+from inklink.config import api_key_for_profile, load_config
 from inklink.tui.screens import (
     DashboardScreen,
     RuntimeApprovalsScreen,
@@ -158,7 +158,7 @@ class InklinkApp(App[None]):
             )
             app_config = load_config(options.config_path)
             api_keys = {
-                name: os.environ.get(profile.api_key_env)
+                name: api_key_for_profile(profile, os.environ)
                 for name, profile in app_config.models.items()
             }
             summary = await InklinkPipeline(

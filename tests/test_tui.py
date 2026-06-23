@@ -246,6 +246,7 @@ async def test_tui_ctrl_r_starts_pipeline_when_input_dir_is_set(monkeypatch, tmp
 [models.default]
 api = "responses"
 model = "fake-model"
+api_key = "sk-from-config"
 api_key_env = "MISSING_FAKE_KEY"
 """,
         encoding="utf-8",
@@ -267,6 +268,7 @@ api_key_env = "MISSING_FAKE_KEY"
 
     assert "运行完成" in str(status)
     assert captured["options"].input_dir == novel
+    assert captured["api_keys"] == {"default": "sk-from-config"}
     assert latest_runtime_id == "runtime"
 
 
