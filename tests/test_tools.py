@@ -16,6 +16,8 @@ def test_default_registry_exposes_chat_function_schema() -> None:
     properties = parameters["properties"]
     assert schema["type"] == "function"
     assert function["description"]
+    assert function["strict"] is True
+    assert parameters["additionalProperties"] is False
     assert properties["chapter_number"]["type"] == "integer"
     assert properties["summary"]["type"] == "string"
     assert set(parameters["required"]) == {"chapter_number", "summary"}
@@ -33,6 +35,7 @@ def test_default_registry_exposes_responses_function_schema() -> None:
     assert schema["description"]
     assert schema["strict"] is True
     assert "function" not in schema
+    assert parameters["additionalProperties"] is False
     assert properties["chapter_number"]["type"] == "integer"
     assert properties["summary"]["type"] == "string"
     assert set(parameters["required"]) == {"chapter_number", "summary"}

@@ -33,7 +33,7 @@ class ToolRegistry:
                             "summary": {"type": "string"},
                         },
                         "required": ["chapter_number", "summary"],
-                        "additionalProperties": True,
+                        "additionalProperties": False,
                     },
                     handler=_record_chapter_analysis,
                 )
@@ -48,6 +48,7 @@ class ToolRegistry:
                     "name": tool.name,
                     "description": tool.description,
                     "parameters": tool.parameters,
+                    "strict": tool.strict,
                 },
             }
             for tool in self._tools.values()
