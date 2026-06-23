@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self, cast
@@ -2199,6 +2200,7 @@ class InklinkPipeline:
             input_payload=input_payload,
             profile_name=profile_name,
             tool_spec=tool_spec,
+            tool_schema_mode=profile.tool_schema_mode,
             approval_messages_hash=approval_messages_hash,
             generation=generation,
         )
@@ -2243,6 +2245,7 @@ class InklinkPipeline:
                 request={
                     "tool_name": tool_spec.name,
                     "generation": generation,
+                    "tool_schema_mode": profile.tool_schema_mode,
                     "input": (
                         input_payload
                         if config.runtime.save_full_prompts
@@ -2751,17 +2754,124 @@ def _tool_schema(name: str, model: type[BaseModel]) -> dict[str, object]:
 
 
 def _schema_for_api(schema: dict[str, object], profile: ModelProfile) -> dict[str, object]:
+    parameters = _schema_parameters_for_api(schema, profile)
     if profile.api == "responses":
-        return schema
-    return {
-        "type": "function",
-        "function": {
+        api_schema = {
+            "type": schema["type"],
             "name": schema["name"],
             "description": schema.get("description", ""),
-            "parameters": schema["parameters"],
-            "strict": schema.get("strict", True),
-        },
+            "parameters": parameters,
+        }
+        if profile.tool_schema_mode == "strict":
+            api_schema["strict"] = schema.get("strict", True)
+        return api_schema
+    function_schema = {
+        "name": schema["name"],
+        "description": schema.get("description", ""),
+        "parameters": parameters,
     }
+    if profile.tool_schema_mode == "strict":
+        function_schema["strict"] = schema.get("strict", True)
+    return {"type": "function", "function": function_schema}
+
+
+def _schema_parameters_for_api(
+    schema: dict[str, object],
+    profile: ModelProfile,
+) -> dict[str, object]:
+    parameters = schema["parameters"]
+    if not isinstance(parameters, dict):
+        raise TypeError("tool schema parameters must be an object")
+    if profile.tool_schema_mode == "strict":
+        return parameters
+    return _compatible_json_schema(parameters)
+
+
+_COMPATIBLE_SCHEMA_OMIT_KEYS = {
+    "$defs",
+    "default",
+    "examples",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "maxLength",
+    "maximum",
+    "minLength",
+    "minimum",
+    "pattern",
+    "title",
+}
+
+
+def _compatible_json_schema(schema: dict[str, object]) -> dict[str, object]:
+    defs = schema.get("$defs")
+    return _simplify_schema_node(
+        deepcopy(schema),
+        defs=defs if isinstance(defs, dict) else {},
+        resolving=(),
+    )
+
+
+def _simplify_schema_node(
+    value: object,
+    *,
+    defs: dict[str, object],
+    resolving: tuple[str, ...],
+) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TypeError("JSON schema node must be an object")
+
+    ref = value.get("$ref")
+    if isinstance(ref, str):
+        resolved = _resolve_schema_ref(ref, defs=defs, resolving=resolving)
+        if resolved is not None:
+            return resolved
+
+    any_of = value.get("anyOf")
+    if isinstance(any_of, list):
+        non_null = [
+            item
+            for item in any_of
+            if not (isinstance(item, dict) and item.get("type") == "null")
+        ]
+        if len(non_null) == 1 and isinstance(non_null[0], dict):
+            return _simplify_schema_node(non_null[0], defs=defs, resolving=resolving)
+
+    simplified: dict[str, object] = {}
+    for key, item in value.items():
+        if key in _COMPATIBLE_SCHEMA_OMIT_KEYS or key in {"$ref", "anyOf"}:
+            continue
+        if isinstance(item, dict):
+            simplified[key] = _simplify_schema_node(item, defs=defs, resolving=resolving)
+        elif isinstance(item, list):
+            simplified[key] = [
+                _simplify_schema_node(child, defs=defs, resolving=resolving)
+                if isinstance(child, dict)
+                else child
+                for child in item
+            ]
+        else:
+            simplified[key] = item
+    if simplified.get("type") == "object":
+        simplified.setdefault("additionalProperties", False)
+    return simplified
+
+
+def _resolve_schema_ref(
+    ref: str,
+    *,
+    defs: dict[str, object],
+    resolving: tuple[str, ...],
+) -> dict[str, object] | None:
+    prefix = "#/$defs/"
+    if not ref.startswith(prefix):
+        return None
+    name = ref.removeprefix(prefix)
+    if name in resolving:
+        raise ValueError(f"recursive JSON schema reference is not supported: {ref}")
+    target = defs.get(name)
+    if not isinstance(target, dict):
+        return None
+    return _simplify_schema_node(target, defs=defs, resolving=(*resolving, name))
 
 
 def _tool_choice_for(profile: ModelProfile, tool_name: str) -> dict[str, object]:
@@ -3155,6 +3265,7 @@ def _call_idempotency_key(
     input_payload: Mapping[str, object],
     profile_name: str,
     tool_spec: _ToolSpec,
+    tool_schema_mode: str,
     approval_messages_hash: str,
     generation: int,
 ) -> str:
@@ -3164,6 +3275,7 @@ def _call_idempotency_key(
         "profile": profile_name,
         "toolset_version": "inklink-tools-v2",
         "prompt_version": "inklink-prompts-v1",
+        "tool_schema_mode": tool_schema_mode,
         "task_parameters_hash": _hash_json(
             {"tool_name": tool_spec.name, "schema": tool_spec.schema}
         ),

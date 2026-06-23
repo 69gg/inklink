@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from inklink.config import ModelProfile
 from inklink.domain.models import ChapterContract, ChapterPlan
 from inklink.llm.types import NormalizedUsage
 from inklink.workflow import pipeline as pipeline_module
@@ -354,6 +355,23 @@ def _fake_chapter_title(chapter_number: int) -> str:
     return names.get(chapter_number, f"第{chapter_number}章 青灯")
 
 
+def _schema_contains_key(value: object, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_schema_contains_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_schema_contains_key(item, key) for item in value)
+    return False
+
+
+def _schema_path(value: object, *keys: str) -> dict[str, object]:
+    current = value
+    for key in keys:
+        assert isinstance(current, dict)
+        current = current[key]
+    assert isinstance(current, dict)
+    return current
+
+
 def write_config(path: Path) -> None:
     path.write_text(
         """
@@ -576,6 +594,66 @@ async def test_openai_tool_llm_calls_expected_tool_with_chat_schema(
         "function": {"name": "record_chapter_analysis"},
     }
     assert result.payload["summary"] == "开篇"
+
+
+def test_compatible_tool_schema_removes_grammar_hostile_keywords() -> None:
+    profile = ModelProfile(
+        api="chat_completions",
+        model="fake-chat",
+        tool_schema_mode="compatible",
+    )
+
+    tool = pipeline_module._schema_for_api(
+        pipeline_module._TOOL_SPECS["record_chapter_analysis"].schema,
+        profile,
+    )
+
+    function = tool["function"]
+    assert isinstance(function, dict)
+    assert "strict" not in function
+    parameters = function["parameters"]
+    assert isinstance(parameters, dict)
+    for key in (
+        "$defs",
+        "$ref",
+        "anyOf",
+        "default",
+        "exclusiveMinimum",
+        "minLength",
+        "minimum",
+        "title",
+    ):
+        assert not _schema_contains_key(parameters, key)
+
+    plot_thread_items = _schema_path(
+        parameters,
+        "properties",
+        "plot_thread_facts",
+        "items",
+        "properties",
+    )
+    assert plot_thread_items["status"] == {
+        "enum": ["seeded", "reinforced", "due", "resolved", "abandoned"],
+        "type": "string",
+    }
+    assert plot_thread_items["due_chapter"] == {"type": "integer"}
+
+
+def test_compatible_responses_tool_schema_omits_strict_flag() -> None:
+    profile = ModelProfile(
+        api="responses",
+        model="fake-responses",
+        tool_schema_mode="compatible",
+    )
+
+    tool = pipeline_module._schema_for_api(
+        pipeline_module._TOOL_SPECS["record_chapter_analysis"].schema,
+        profile,
+    )
+
+    assert tool["name"] == "record_chapter_analysis"
+    assert "strict" not in tool
+    assert isinstance(tool["parameters"], dict)
 
 
 @pytest.mark.asyncio

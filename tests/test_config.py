@@ -155,6 +155,25 @@ def test_responses_request_options_use_responses_parameter_names() -> None:
     assert "max_completion_tokens" not in options
 
 
+def test_tool_schema_mode_defaults_to_strict() -> None:
+    config = AppConfig.model_validate({"models": {"default": {"model": "gpt-test"}}})
+    assert config.models["default"].tool_schema_mode == "strict"
+
+
+def test_tool_schema_mode_accepts_compatible() -> None:
+    config = AppConfig.model_validate(
+        {
+            "models": {
+                "default": {
+                    "model": "gpt-test",
+                    "tool_schema_mode": "compatible",
+                }
+            }
+        }
+    )
+    assert config.models["default"].tool_schema_mode == "compatible"
+
+
 def test_chat_completions_request_options_use_chat_parameter_names() -> None:
     config = AppConfig.model_validate(
         {
@@ -247,6 +266,20 @@ def test_invalid_api_is_rejected() -> None:
                     "default": {
                         "api": "completion",
                         "model": "gpt-test",
+                    }
+                }
+            }
+        )
+
+
+def test_invalid_tool_schema_mode_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        AppConfig.model_validate(
+            {
+                "models": {
+                    "default": {
+                        "model": "gpt-test",
+                        "tool_schema_mode": "loose",
                     }
                 }
             }

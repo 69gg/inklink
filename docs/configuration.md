@@ -80,6 +80,7 @@ WebUI 首页和 CLI `inklink run --execute` 支持在每次续写任务开始时
 | `models.<profile>.api_key` | string 或空字符串 | `None` | 可直接写明文 API key；非空时优先于 `api_key_env`。请确认本地 `config.toml` 不会提交。 |
 | `models.<profile>.api_key_env` | string | `"OPENAI_API_KEY"` | `api_key` 留空时读取 API key 的环境变量名。 |
 | `models.<profile>.base_url` | string 或空字符串 | `None` | 留空使用 OpenAI SDK 默认地址；OpenAI-compatible 服务可填写自定义 `/v1` base URL。 |
+| `models.<profile>.tool_schema_mode` | `"strict"` 或 `"compatible"` | `"strict"` | `strict` 发送完整 Pydantic JSON Schema；`compatible` 发送简化 function tool schema，并由本地 Pydantic 继续严格校验模型返回。兼容服务报 `Invalid grammar request` 时使用 `compatible`。 |
 | `models.<profile>.temperature` | float，`0..2`，或空字符串 | `None` | 非空时传给请求。 |
 | `models.<profile>.top_p` | float，`0..1`，或空字符串 | `None` | 非空时传给请求。 |
 | `models.<profile>.reasoning_effort` | string 或空字符串 | `None` | 留空不传；非空时原样传给服务端。Responses 适配器会转换为 `reasoning={"effort": value}`；Chat Completions 适配器使用 `reasoning_effort=value`。本工具不枚举限制该值，具体模型或兼容服务是否支持由服务端决定。 |

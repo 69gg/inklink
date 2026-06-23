@@ -84,6 +84,8 @@ Chat Completions function tool 是 wrapped 结构：
 
 Chat Completions 的结构化输出请求形状是 `response_format`。这不能与 Responses 的 `text.format` 互换。
 
+如果 OpenAI-compatible 服务在请求阶段返回 `Invalid grammar request`，通常是服务端不支持完整 Pydantic JSON Schema。将对应 profile 的 `tool_schema_mode` 设为 `compatible` 后，Inklink 会发送简化后的 function tool schema，并继续用本地 Pydantic 模型严格校验 tool arguments。
+
 ## 请求参数映射
 
 通用配置会按 API 类型映射成不同请求参数：

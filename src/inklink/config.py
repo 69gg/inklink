@@ -8,6 +8,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ApiKind = Literal["responses", "chat_completions"]
+ToolSchemaMode = Literal["strict", "compatible"]
 
 
 class RuntimeConfig(BaseModel):
@@ -61,6 +62,7 @@ class ModelProfile(BaseModel):
     top_p: float | None = Field(default=None, ge=0, le=1)
     reasoning_effort: str | None = None
     max_completion_tokens: int | None = Field(default=None, gt=0)
+    tool_schema_mode: ToolSchemaMode = "strict"
 
 
 class AppConfig(BaseModel):

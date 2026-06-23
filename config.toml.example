@@ -63,6 +63,10 @@ api_key_env = "OPENAI_API_KEY"
 # 留空使用 SDK 默认地址；兼容服务可填写自定义 /v1 base_url。
 base_url = ""
 
+# strict 发送完整 Pydantic JSON Schema；compatible 发送简化 tool schema。
+# 如果兼容服务报 Invalid grammar request，改为 compatible。
+tool_schema_mode = "strict"
+
 # 空值不传给 SDK。reasoning_effort 非空时会原样传给服务端；
 # 常见 OpenAI 值包括 none、minimal、low、medium、high、xhigh，
 # 兼容服务或新模型自定义值也不会被本工具拦截。
