@@ -7,8 +7,10 @@ from inklink.tui.screens import (
     RuntimeArtifactsScreen,
     RuntimeLogScreen,
     StatsScreen,
+    _format_node_tree,
 )
 from inklink.workflow.pipeline import PipelineSummary, RunStats
+from inklink.workflow.service import WorkflowService
 
 
 async def test_tui_app_starts_with_expected_title() -> None:
@@ -25,6 +27,27 @@ async def test_tui_initial_interface_contains_workspace_text() -> None:
         body_text = pilot.app.screen.query_one("#setup-workspace", Static).render()
 
     assert "输入目录" in str(body_text)
+
+
+async def test_tui_initial_interface_contains_generation_controls() -> None:
+    app = InklinkApp()
+
+    async with app.run_test() as pilot:
+        screen = pilot.app.screen
+
+        assert screen.query_one("#tui-input-dir", Input)
+        assert screen.query_one("#tui-config-path", Input)
+        assert screen.query_one("#tui-runtime-id", Input)
+        assert screen.query_one("#tui-chapter-count", Input)
+        assert screen.query_one("#tui-start-chapter", Input)
+        assert screen.query_one("#tui-min-chars", Input)
+        assert screen.query_one("#tui-max-chars", Input)
+        assert screen.query_one("#tui-max-revision-rounds", Input)
+        assert screen.query_one("#tui-output-mode", Input)
+        assert screen.query_one("#tui-auto-approve", Input)
+        assert screen.query_one("#tui-log-root", Input)
+        assert screen.query_one("#run-pipeline", Button)
+        assert screen.query_one("#resume-pipeline", Button)
 
 
 async def test_tui_f1_shows_dashboard_screen() -> None:
@@ -73,10 +96,88 @@ async def test_tui_runtime_screens_open_from_function_keys() -> None:
         await pilot.press("f4")
         assert isinstance(pilot.app.screen, RuntimeApprovalsScreen)
         assert pilot.app.screen.query_one("#approval-id", Input)
+        assert pilot.app.screen.query_one("#approval-message", Input)
+        assert pilot.app.screen.query_one("#record-approval-message", Button)
+        assert pilot.app.screen.query_one("#approval-artifact-type", Input)
+        assert pilot.app.screen.query_one("#chat-update-artifact", Button)
         assert pilot.app.screen.query_one("#approve-artifact", Button)
         await pilot.press("escape")
         await pilot.press("f5")
         assert isinstance(pilot.app.screen, RuntimeLogScreen)
+
+
+async def test_tui_artifacts_screen_contains_diff_controls() -> None:
+    app = InklinkApp()
+
+    async with app.run_test() as pilot:
+        await pilot.press("f3")
+
+        assert isinstance(pilot.app.screen, RuntimeArtifactsScreen)
+        assert pilot.app.screen.query_one("#diff-artifact-id", Input)
+        assert pilot.app.screen.query_one("#diff-left-version", Input)
+        assert pilot.app.screen.query_one("#diff-right-version", Input)
+        assert pilot.app.screen.query_one("#show-artifact-diff", Button)
+        assert pilot.app.screen.query_one("#artifact-diff-output", Static)
+
+
+def test_tui_formats_node_tree_from_dependencies() -> None:
+    tree = _format_node_tree(
+        [
+            {
+                "node_id": "load_project",
+                "node_type": "load_project",
+                "status": "completed",
+                "depends_on": [],
+            },
+            {
+                "node_id": "analyze_chapter:1",
+                "node_type": "analyze_chapter",
+                "status": "completed",
+                "depends_on": ["load_project"],
+            },
+            {
+                "node_id": "write_output:2",
+                "node_type": "write_output",
+                "status": "waiting",
+                "depends_on": ["analyze_chapter:1"],
+                "waiting_reason": "目标文件已存在",
+            },
+        ]
+    )
+
+    assert "load_project [completed]" in tree
+    assert "  analyze_chapter:1 [completed]" in tree
+    assert "目标文件已存在" in tree
+
+
+async def test_tui_approval_message_button_records_message(tmp_path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(novel)
+
+    app = InklinkApp(input_dir=novel, log_root=log_root)
+    app.latest_runtime_id = run.runtime_id
+
+    async with app.run_test() as pilot:
+        await pilot.press("f4")
+        pilot.app.screen.query_one("#approval-id", Input).value = "outline"
+        pilot.app.screen.query_one("#approval-message", Input).value = "请强化冲突"
+
+        await pilot.click("#record-approval-message")
+        await pilot.pause()
+
+        status = pilot.app.screen.query_one("#approval-command-status", Static).render()
+
+    assert "记录消息" in str(status)
+    with WorkflowService(log_root=log_root) as service:
+        service.inspect_run(run.runtime_id)
+        messages = service.list_messages("outline")
+
+    assert messages[0]["content"] == "请强化冲突"
 
 
 async def test_tui_ctrl_r_starts_pipeline_when_input_dir_is_set(monkeypatch, tmp_path) -> None:
@@ -129,3 +230,80 @@ api_key_env = "MISSING_FAKE_KEY"
     assert "运行完成" in str(status)
     assert captured["options"].input_dir == novel
     assert latest_runtime_id == "runtime"
+
+
+async def test_tui_ctrl_r_uses_generation_controls(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, llm: object) -> None:
+            captured["llm"] = llm
+
+        async def run(self, options: object) -> object:
+            captured["options"] = options
+            return PipelineSummary(
+                runtime_id="runtime-from-controls",
+                log_dir=tmp_path / "custom-logs" / "runtime-from-controls",
+                generated_chapters=[8, 9],
+                output_files=[],
+                stats=RunStats(total_calls=2),
+                status="waiting_approval",
+                waiting_approval_id="outline",
+            )
+
+    class FakeLLM:
+        def __init__(self, config: object, api_keys: object) -> None:
+            captured["config"] = config
+            captured["api_keys"] = api_keys
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[models.default]
+api = "responses"
+model = "fake-model"
+api_key_env = "MISSING_FAKE_KEY"
+""",
+        encoding="utf-8",
+    )
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    log_root = tmp_path / "custom-logs"
+
+    monkeypatch.setattr("inklink.tui.app.InklinkPipeline", FakePipeline)
+    monkeypatch.setattr("inklink.tui.app.OpenAIToolLLM", FakeLLM)
+
+    app = InklinkApp()
+
+    async with app.run_test() as pilot:
+        pilot.app.screen.query_one("#tui-input-dir", Input).value = str(novel)
+        pilot.app.screen.query_one("#tui-config-path", Input).value = str(config)
+        pilot.app.screen.query_one("#tui-log-root", Input).value = str(log_root)
+        pilot.app.screen.query_one("#tui-chapter-count", Input).value = "2"
+        pilot.app.screen.query_one("#tui-start-chapter", Input).value = "8"
+        pilot.app.screen.query_one("#tui-min-chars", Input).value = "1200"
+        pilot.app.screen.query_one("#tui-max-chars", Input).value = "2400"
+        pilot.app.screen.query_one("#tui-max-revision-rounds", Input).value = "3"
+        pilot.app.screen.query_one("#tui-output-mode", Input).value = "writeback"
+        pilot.app.screen.query_one("#tui-auto-approve", Input).value = "是"
+
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+
+        status = pilot.app.screen.query_one("#setup-workspace", Static).render()
+        latest_runtime_id = pilot.app.latest_runtime_id
+
+    options = captured["options"]
+    assert "runtime-from-controls" in str(status)
+    assert options.input_dir == novel
+    assert options.config_path == config
+    assert options.log_root == log_root
+    assert options.runtime_id is None
+    assert options.chapter_count == 2
+    assert options.start_chapter == 8
+    assert options.min_chars == 1200
+    assert options.max_chars == 2400
+    assert options.max_revision_rounds == 3
+    assert options.output_mode == "writeback"
+    assert options.auto_approve is True
+    assert latest_runtime_id == "runtime-from-controls"

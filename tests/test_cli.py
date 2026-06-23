@@ -4,8 +4,9 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from inklink.cli import app
+from inklink.llm.types import NormalizedUsage
 from inklink.tui.app import InklinkApp
-from inklink.workflow.pipeline import GenerationOptions, PipelineSummary, RunStats
+from inklink.workflow.pipeline import GenerationOptions, PipelineSummary, RunStats, ToolCallResult
 from inklink.workflow.service import WorkflowService
 
 runner = CliRunner()
@@ -69,8 +70,24 @@ def test_cli_run_execute_invokes_pipeline(monkeypatch: MonkeyPatch, tmp_path: Pa
                 stats=RunStats.model_validate(
                     {
                         "total_calls": 2,
+                        "by_profile": {
+                            "default": {
+                                "calls": 2,
+                                "input_tokens": 10,
+                                "output_tokens": 6,
+                                "total_tokens": 16,
+                            }
+                        },
                         "by_model": {
                             "fake-model": {
+                                "calls": 2,
+                                "input_tokens": 10,
+                                "output_tokens": 6,
+                                "total_tokens": 16,
+                            }
+                        },
+                        "by_task": {
+                            "drafting": {
                                 "calls": 2,
                                 "input_tokens": 10,
                                 "output_tokens": 6,
@@ -130,8 +147,84 @@ api_key_env = "MISSING_FAKE_KEY"
     assert options.chapter_count == 1
     assert options.auto_approve is True
     assert options.runtime_id == "runtime"
+    assert "usage_total" in result.output
+    assert "usage_by_profile" in result.output
     assert "usage_by_model" in result.output
+    assert "usage_by_task" in result.output
     assert "fake-model" in result.output
+    assert "cached" not in result.output
+    assert "cache_read" not in result.output
+    assert "cache_write" not in result.output
+    assert "reasoning" not in result.output
+
+
+def test_cli_run_execute_prints_optional_usage_fields(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakePipeline:
+        def __init__(self, llm: object) -> None:
+            pass
+
+        async def run(self, options: object) -> PipelineSummary:
+            stats = RunStats()
+            stats.add(
+                ToolCallResult(
+                    payload={},
+                    usage=NormalizedUsage(
+                        input_tokens=10,
+                        output_tokens=6,
+                        total_tokens=16,
+                        cached_tokens=5,
+                        cache_read_tokens=3,
+                        cache_write_tokens=2,
+                        reasoning_tokens=4,
+                    ),
+                    profile_name="default",
+                    model="fake-model",
+                    task_type="drafting",
+                )
+            )
+            return PipelineSummary(
+                runtime_id="runtime",
+                log_dir=tmp_path / "logs" / "runtime",
+                generated_chapters=[],
+                output_files=[],
+                stats=stats,
+            )
+
+    class FakeLLM:
+        def __init__(self, config: object, api_keys: object) -> None:
+            pass
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[models.default]
+api = "responses"
+model = "fake-model"
+api_key_env = "MISSING_FAKE_KEY"
+""",
+        encoding="utf-8",
+    )
+    novel = tmp_path / "novel"
+    novel.mkdir()
+
+    monkeypatch.setattr("inklink.cli.InklinkPipeline", FakePipeline)
+    monkeypatch.setattr("inklink.cli.OpenAIToolLLM", FakeLLM)
+
+    result = runner.invoke(
+        app,
+        ["run", str(novel), "--config", str(config_path), "--execute"],
+    )
+
+    assert result.exit_code == 0
+    assert "usage_total" in result.output
+    expected = "calls=1 input=10 output=6 total=16 cached=5 cache_read=3 cache_write=2 reasoning=4"
+    assert f"total: {expected}" in result.output
+    assert f"default: {expected}" in result.output
+    assert f"fake-model: {expected}" in result.output
+    assert f"drafting: {expected}" in result.output
 
 
 def test_cli_workflow_commands_operate_existing_runtime(tmp_path: Path) -> None:
@@ -253,6 +346,71 @@ def test_cli_workflow_commands_operate_existing_runtime(tmp_path: Path) -> None:
     assert nodes.output.strip() == "[]"
     assert events.exit_code == 0
     assert "run_resumed" in events.output
+
+
+def test_cli_workflow_stats_prints_optional_usage_fields(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+    service = WorkflowService(log_root=log_root)
+    run = service.start_run(novel)
+    first_call_id = service._current_run().store.create_llm_call(
+        runtime_id=run.runtime_id,
+        idempotency_key="key-1",
+        task_type="review",
+        profile="default",
+        api_type="responses",
+        model="fake",
+        attempt=1,
+        request={},
+    )
+    service._current_run().store.complete_llm_call(
+        call_id=first_call_id,
+        request_id="req-1",
+        response={},
+        usage=NormalizedUsage(
+            input_tokens=2,
+            output_tokens=3,
+            total_tokens=5,
+            cached_tokens=8,
+            reasoning_tokens=4,
+            cache_read_tokens=6,
+            cache_write_tokens=1,
+        ),
+    )
+    second_call_id = service._current_run().store.create_llm_call(
+        runtime_id=run.runtime_id,
+        idempotency_key="key-2",
+        task_type="review",
+        profile="default",
+        api_type="responses",
+        model="fake",
+        attempt=1,
+        request={},
+    )
+    service._current_run().store.complete_llm_call(
+        call_id=second_call_id,
+        request_id="req-2",
+        response={},
+        usage=NormalizedUsage(
+            input_tokens=1,
+            output_tokens=2,
+            total_tokens=3,
+            cached_tokens=2,
+            reasoning_tokens=5,
+            cache_read_tokens=7,
+        ),
+    )
+    service.close()
+
+    stats = runner.invoke(app, ["workflow", "stats", run.runtime_id, "--log-root", str(log_root)])
+
+    assert stats.exit_code == 0
+    assert (
+        "default/fake/review: calls=2 input=3 output=5 total=8 "
+        "cached=10 cache_read=13 cache_write=1 reasoning=9"
+    ) in stats.output
 
 
 def test_cli_workflow_chat_update_invokes_runner(

@@ -104,8 +104,11 @@ class StateStore:
         idempotency_key: str | None = None,
         input_version: str | None = None,
         output_version: str | None = None,
+        depends_on: list[str] | None = None,
+        waiting_reason: str | None = None,
         error_summary: str | None = None,
     ) -> None:
+        depends_on_json = _dump_json(sorted(set(depends_on))) if depends_on is not None else None
         self._connection.execute(
             """
             INSERT INTO nodes(
@@ -116,6 +119,8 @@ class StateStore:
               idempotency_key,
               input_version,
               output_version,
+              depends_on_json,
+              waiting_reason,
               error_summary,
               started_at,
               finished_at
@@ -128,9 +133,11 @@ class StateStore:
               ?,
               ?,
               ?,
+              COALESCE(?, '[]'),
+              ?,
               ?,
               CASE WHEN ? = 'running' THEN CURRENT_TIMESTAMP ELSE NULL END,
-              CASE WHEN ? IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE NULL END
+              CASE WHEN ? IN ('completed', 'failed', 'waiting') THEN CURRENT_TIMESTAMP ELSE NULL END
             )
             ON CONFLICT(node_id) DO UPDATE SET
               node_type = excluded.node_type,
@@ -139,13 +146,15 @@ class StateStore:
               idempotency_key = COALESCE(?, nodes.idempotency_key),
               input_version = COALESCE(?, nodes.input_version),
               output_version = COALESCE(?, nodes.output_version),
+              depends_on_json = COALESCE(?, nodes.depends_on_json),
+              waiting_reason = ?,
               error_summary = ?,
               started_at = CASE
                 WHEN excluded.status = 'running' THEN CURRENT_TIMESTAMP
                 ELSE nodes.started_at
               END,
               finished_at = CASE
-                WHEN excluded.status IN ('completed', 'failed') THEN CURRENT_TIMESTAMP
+                WHEN excluded.status IN ('completed', 'failed', 'waiting') THEN CURRENT_TIMESTAMP
                 ELSE nodes.finished_at
               END
             """,
@@ -157,6 +166,8 @@ class StateStore:
                 idempotency_key,
                 input_version,
                 output_version,
+                depends_on_json,
+                waiting_reason,
                 error_summary,
                 status,
                 status,
@@ -164,8 +175,34 @@ class StateStore:
                 idempotency_key,
                 input_version,
                 output_version,
+                depends_on_json,
+                waiting_reason,
                 error_summary,
             ),
+        )
+        self._connection.commit()
+
+    def record_node_artifact(
+        self,
+        *,
+        node_id: str,
+        artifact_id: str,
+        artifact_version: int,
+        direction: str,
+    ) -> None:
+        if direction not in {"input", "output"}:
+            raise ValueError("direction must be input or output")
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO node_artifacts(
+              node_id,
+              artifact_id,
+              artifact_version,
+              direction
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (node_id, artifact_id, artifact_version, direction),
         )
         self._connection.commit()
 
@@ -182,6 +219,8 @@ class StateStore:
                   idempotency_key,
                   input_version,
                   output_version,
+                  depends_on_json,
+                  waiting_reason,
                   error_summary
                 FROM nodes
                 WHERE node_id = ?
@@ -191,7 +230,7 @@ class StateStore:
         )
         if row is None:
             raise KeyError(node_id)
-        return _row_to_dict(row)
+        return _node_row_to_dict(row)
 
     def list_nodes(self) -> list[dict[str, object]]:
         rows = self._connection.execute(
@@ -204,12 +243,14 @@ class StateStore:
               idempotency_key,
               input_version,
               output_version,
+              depends_on_json,
+              waiting_reason,
               error_summary
             FROM nodes
             ORDER BY node_id
             """
         ).fetchall()
-        return [_row_to_dict(row) for row in rows]
+        return [_node_row_to_dict(row) for row in rows]
 
     def get_successful_tool_payload(
         self,
@@ -926,6 +967,16 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, object]:
     return dict(row)
 
 
+def _node_row_to_dict(row: sqlite3.Row) -> dict[str, object]:
+    item = _row_to_dict(row)
+    depends_on_raw = item.pop("depends_on_json", "[]")
+    depends_on = json.loads(str(depends_on_raw))
+    if not isinstance(depends_on, list) or not all(isinstance(value, str) for value in depends_on):
+        raise ValueError("node depends_on_json must decode to a list of strings")
+    item["depends_on"] = depends_on
+    return item
+
+
 def _dump_json(payload: object) -> str:
     TypeAdapter(object).validate_python(payload)
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -952,6 +1003,37 @@ def _migrate_schema(connection: sqlite3.Connection, version: int) -> None:
             connection.execute(
                 "ALTER TABLE artifacts ADD COLUMN is_invalidated INTEGER NOT NULL DEFAULT 0"
             )
+        version = 3
+    if version == 3:
+        nodes_exists = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'"
+            ).fetchone()
+            is not None
+        )
+        if nodes_exists:
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(nodes)").fetchall()
+            }
+            if "depends_on_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE nodes ADD COLUMN depends_on_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "waiting_reason" not in columns:
+                connection.execute("ALTER TABLE nodes ADD COLUMN waiting_reason TEXT")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS node_artifacts (
+              node_id TEXT NOT NULL,
+              artifact_id TEXT NOT NULL,
+              artifact_version INTEGER NOT NULL,
+              direction TEXT NOT NULL CHECK(direction IN ('input', 'output')),
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY(node_id, artifact_id, artifact_version, direction),
+              FOREIGN KEY(node_id) REFERENCES nodes(node_id)
+            )
+            """
+        )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
         return

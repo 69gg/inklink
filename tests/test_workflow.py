@@ -614,6 +614,78 @@ def test_service_records_approval_messages_artifacts_and_stats(tmp_path: Path) -
     assert "approval_accepted" in [event["event_type"] for event in events]
 
 
+def test_service_usage_stats_aggregates_optional_usage_fields(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        run = service.start_run(project)
+        first_call_id = service._current_run().store.create_llm_call(
+            runtime_id=run.runtime_id,
+            idempotency_key="key-1",
+            task_type="review",
+            profile="default",
+            api_type="responses",
+            model="fake",
+            attempt=1,
+            request={},
+        )
+        service._current_run().store.complete_llm_call(
+            call_id=first_call_id,
+            request_id="req-1",
+            response={},
+            usage=NormalizedUsage(
+                input_tokens=2,
+                output_tokens=3,
+                total_tokens=5,
+                cached_tokens=8,
+                reasoning_tokens=4,
+                cache_read_tokens=6,
+                cache_write_tokens=1,
+            ),
+        )
+        second_call_id = service._current_run().store.create_llm_call(
+            runtime_id=run.runtime_id,
+            idempotency_key="key-2",
+            task_type="review",
+            profile="default",
+            api_type="responses",
+            model="fake",
+            attempt=1,
+            request={},
+        )
+        service._current_run().store.complete_llm_call(
+            call_id=second_call_id,
+            request_id="req-2",
+            response={},
+            usage=NormalizedUsage(
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                cached_tokens=2,
+                reasoning_tokens=5,
+                cache_read_tokens=7,
+            ),
+        )
+
+        assert service.usage_stats() == [
+            UsageStatRow(
+                profile="default",
+                model="fake",
+                task_type="review",
+                calls=2,
+                input_tokens=3,
+                output_tokens=5,
+                total_tokens=8,
+                cached_tokens=10,
+                reasoning_tokens=9,
+                cache_read_tokens=13,
+                cache_write_tokens=1,
+            )
+        ]
+
+
 def test_service_chapter_commands_allow_generated_chapter_numbers(tmp_path: Path) -> None:
     project = tmp_path / "novel"
     project.mkdir()

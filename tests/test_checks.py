@@ -122,6 +122,29 @@ def test_plot_thread_rejects_blank_identity_and_keywords() -> None:
         )
 
 
+def test_plot_thread_lifecycle_chapters_match_terminal_status() -> None:
+    with pytest.raises(ValidationError):
+        PlotThread(
+            thread_id="p1",
+            description="旧约定",
+            status=PlotThreadStatus.REINFORCED,
+            source_chapter=1,
+            due_chapter=2,
+            resolved_chapter=2,
+            related_keywords=["旧约定"],
+        )
+    with pytest.raises(ValidationError):
+        PlotThread(
+            thread_id="p1",
+            description="旧约定",
+            status=PlotThreadStatus.RESOLVED,
+            source_chapter=1,
+            due_chapter=2,
+            abandoned_chapter=2,
+            related_keywords=["旧约定"],
+        )
+
+
 def test_chapter_check_passes_when_contract_is_satisfied() -> None:
     contract = ChapterContract(
         chapter_number=1,
@@ -373,6 +396,54 @@ def test_abandoned_plot_thread_cannot_be_resolved_again() -> None:
     assert any(issue.code == "plot_thread_repeated_resolution" for issue in report.issues)
 
 
+def test_plot_thread_resolution_check_is_order_independent_and_deduplicated() -> None:
+    contract = ChapterContract(
+        chapter_number=11,
+        title="第十一章",
+        min_chars=1,
+        max_chars=100,
+        required_characters=[],
+        required_keywords=[],
+        scene_ids=["s1"],
+    )
+    draft = DraftChapter(chapter_number=11, title="第十一章", body="主角回收旧伏笔。")
+    older_thread = PlotThread(
+        thread_id="p1",
+        description="旧钥匙来历",
+        status=PlotThreadStatus.REINFORCED,
+        source_chapter=1,
+        due_chapter=10,
+        related_keywords=["旧钥匙"],
+    )
+    latest_thread = PlotThread(
+        thread_id="p1",
+        description="旧钥匙已经解释",
+        status=PlotThreadStatus.RESOLVED,
+        source_chapter=1,
+        due_chapter=10,
+        related_keywords=["旧钥匙"],
+    )
+
+    first_report = run_chapter_checks(
+        contract=contract,
+        draft=draft,
+        plot_threads=[older_thread, latest_thread, older_thread],
+        resolved_thread_ids=["p1", "p1"],
+    )
+    second_report = run_chapter_checks(
+        contract=contract,
+        draft=draft,
+        plot_threads=[latest_thread, older_thread],
+        resolved_thread_ids=["p1"],
+    )
+
+    first_codes = [issue.code for issue in first_report.issues]
+    second_codes = [issue.code for issue in second_report.issues]
+
+    assert first_codes == ["plot_thread_repeated_resolution"]
+    assert second_codes == first_codes
+
+
 def test_overdue_plot_thread_produces_warning() -> None:
     contract = ChapterContract(
         chapter_number=12,
@@ -400,3 +471,41 @@ def test_overdue_plot_thread_produces_warning() -> None:
         issue.code == "plot_thread_overdue" and issue.severity == "warning"
         for issue in report.issues
     )
+
+
+def test_resolved_or_abandoned_plot_threads_are_not_reported_overdue() -> None:
+    contract = ChapterContract(
+        chapter_number=12,
+        title="第十二章",
+        min_chars=1,
+        max_chars=100,
+        required_characters=[],
+        required_keywords=[],
+        scene_ids=["s1"],
+    )
+    draft = DraftChapter(chapter_number=12, title="第十二章", body="主角继续追查。")
+    resolved_thread = PlotThread(
+        thread_id="p3",
+        description="旧钥匙来历",
+        status=PlotThreadStatus.RESOLVED,
+        source_chapter=2,
+        due_chapter=10,
+        related_keywords=["旧钥匙"],
+    )
+    abandoned_thread = PlotThread(
+        thread_id="p4",
+        description="旧约定",
+        status=PlotThreadStatus.ABANDONED,
+        source_chapter=2,
+        due_chapter=10,
+        related_keywords=["旧约定"],
+    )
+
+    report = run_chapter_checks(
+        contract=contract,
+        draft=draft,
+        plot_threads=[resolved_thread, abandoned_thread],
+    )
+
+    assert report.passed
+    assert report.issues == []

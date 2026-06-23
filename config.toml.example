@@ -18,6 +18,15 @@ retrieval_token_budget = ""
 # 每章自动修订最多轮数。
 max_revision_rounds = 3
 
+# 每多少章生成一个区间摘要。长篇项目建议保持在 20-100 之间。
+range_summary_chapter_span = 50
+
+# story_merge 额外注入最近多少章单章分析；较早内容通过区间摘要和索引提供。
+story_merge_recent_chapters = 20
+
+# 连续生成多章时，生成章节跨过区间边界后刷新对应区间摘要。
+refresh_range_summary_after_generation = true
+
 [approvals]
 # 默认关闭自动批准，避免用户错过关键规划节点。
 auto_approve_outline = false

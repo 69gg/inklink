@@ -40,7 +40,7 @@ load_project
 
 审批聊天每轮消息都参与幂等键，避免同一节点在审批上下文变化后复用旧结果。
 
-当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 的 F4 屏幕提供基础批准、重试、放弃章节和重写章节控件；完整 artifact diff 和可视化节点树仍是后续增强。
+当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 首页可填写运行参数并启动或恢复 runtime；F1 展示文本 DAG 树和 runtime 状态；F4 屏幕可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节；F3 屏幕可输入 artifact ID 与两个版本号查看 JSON/unified diff。
 
 ## auto-approve
 
@@ -68,6 +68,8 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 
 当前代码已实现 `WorkflowNode.idempotency_key(...)` 与 `IdempotencyInputs`，并验证 generation、审批消息、任务参数、prompt 版本、toolset 版本和 profile 变化会改变 key。pipeline 的 LLM 调用会先查 `llm_calls/tool_calls` 中相同 key 的成功结果，命中时复用 tool payload，不再次调用模型。
 
+结构化索引的 typed views 也遵循同一 generation 规则。`StoryIndex.characters`、`plot_threads`、`events`、`world_rules` 和 `keywords` 不作为独立事实写入；它们从当前有效 `entity_mentions`、`structured_facts` 和 `abandoned_generations` 重建。放弃或重写章节后，对应 generation 的伏笔状态、回收窗口、世界观规则、事件和关键词投影会随事实撤回而消失。
+
 ## retry 与 rewrite_chapter
 
 `retry` 用于瞬时技术错误，例如网络超时、429、5xx、进程中断或可恢复的 SDK 异常。retry 不递增 generation，目标是重新执行同一个节点尝试。
@@ -89,7 +91,7 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 
 这样可以避免把硬性格式、字数、合同问题交给叙事 review 判断。
 
-## 当前实现限制
+## 当前实现边界
 
 当前 workflow service 和 pipeline 的边界如下：
 
@@ -106,9 +108,10 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 - `WorkflowExecutor` 能按依赖运行节点、拒绝重复节点和循环依赖，并在 runner 失败时标记 failed。
 - `InklinkPipeline` 会执行当前端到端生成流：`chapter_extraction`、`range_summary`、`story_merge`、`outline_planning`、`chapter_planning`、`scene_planning`、`drafting`、`review`、`revision`、生成章节集成分析和输出写入。
 - 同章内场景按顺序生成，后续场景 prompt 包含前序场景正文。
-- 确定性检查覆盖章节字数、场景字数、场景总目标区间、必须人物/关键词和重复回收伏笔。
-- `output` 模式写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`；`writeback` 模式拒绝覆盖已存在目标文件。
+- 确定性检查覆盖章节字数、场景字数、场景总目标区间、必须人物/关键词和重复回收伏笔。伏笔检查会按 `thread_id` 对 `PlotThread` 去重，乱序输入下仍确定性检查已 resolved/abandoned 伏笔的重复回收，以及超过 `due_chapter` 且未终止的伏笔。
+- `output` 模式写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`；`writeback` 模式在目标文件已存在时写入 `pending_writeback` 并进入 `waiting_write_output`，目标释放后 resume 会原子落盘。
 - `--resume-runtime-id` 会恢复同一 runtime，复用已成功 LLM tool result，并跳过已完成且输出文件仍存在的章节。
 - `inklink workflow ...` 子命令可对已有 runtime 执行 info、stats、nodes、artifacts、artifact、approvals、messages、events、message、chat-update、approve、retry、abandon 和 rewrite。查询类命令使用只读 inspect，不会把已完成 run 改回 running。
+- TUI 已提供参数化启动/恢复入口、runtime 状态汇总、文本 DAG 树、审批消息、AI 产物修改、artifact diff、批准、retry、abandon 和 rewrite 控件。
 
-仍未完整接通的部分包括：artifact diff、可视化 DAG 节点树、完整结构化检索查询、后台 daemon 和 shallow 分析自动升级。
+首版保持同进程 TUI/workflow service 边界，不提供后台 daemon。若某章节 generation 已被吸收到区间摘要后才被放弃，结构化索引事实会撤回，但对应区间摘要需要重新生成后才能彻底移除该 generation 的自然语言痕迹。

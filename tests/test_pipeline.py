@@ -19,6 +19,7 @@ from inklink.workflow.pipeline import (
 class FakeToolLLM(ToolLLM):
     def __init__(self, draft_body: str | None = None) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.inputs: list[tuple[str, str, str]] = []
         self._draft_body = draft_body or "林秋推开门，看见青灯亮起，青灯映出旧钥匙。"
 
     async def call_tool(
@@ -32,6 +33,7 @@ class FakeToolLLM(ToolLLM):
         schema: dict[str, object],
     ) -> ToolCallResult:
         self.calls.append((task_type, tool_name))
+        self.inputs.append((task_type, tool_name, input_text))
         payload = self._payload_for(tool_name, input_text)
         return ToolCallResult(
             payload=payload,
@@ -171,6 +173,40 @@ class FailingReviewLLM(FakeToolLLM):
         )
 
 
+class DetailedUsageLLM(FakeToolLLM):
+    async def call_tool(
+        self,
+        *,
+        task_type: str,
+        profile_name: str,
+        tool_name: str,
+        instructions: str,
+        input_text: str,
+        schema: dict[str, object],
+    ) -> ToolCallResult:
+        result = await super().call_tool(
+            task_type=task_type,
+            profile_name=profile_name,
+            tool_name=tool_name,
+            instructions=instructions,
+            input_text=input_text,
+            schema=schema,
+        )
+        return result.model_copy(
+            update={
+                "usage": NormalizedUsage(
+                    input_tokens=10,
+                    output_tokens=5,
+                    total_tokens=15,
+                    cached_tokens=4,
+                    reasoning_tokens=2,
+                    cache_read_tokens=3,
+                    cache_write_tokens=1,
+                )
+            }
+        )
+
+
 def write_chapter(path: Path, title: str, body: str) -> None:
     path.write_text(f"title: {title}\n---\n{body}", encoding="utf-8")
 
@@ -199,6 +235,35 @@ auto_approve_outline = true
 auto_approve_chapter_plan = true
 auto_approve_scene_plan = true
 auto_approve_review_failure = false
+
+[models.default]
+api = "responses"
+model = "fake-model"
+api_key_env = "INKLINK_FAKE_KEY"
+
+[tasks]
+drafting = "default"
+review = "default"
+""",
+        encoding="utf-8",
+    )
+
+
+def write_config_with_cold_start(path: Path) -> None:
+    path.write_text(
+        """
+[cold_start]
+enabled = true
+recent_chapters_to_deep_analyze = 1
+
+[approvals]
+auto_approve_outline = true
+auto_approve_chapter_plan = true
+auto_approve_scene_plan = true
+
+[writing]
+range_summary_chapter_span = 2
+story_merge_recent_chapters = 1
 
 [models.default]
 api = "responses"
@@ -338,6 +403,88 @@ async def test_pipeline_generates_chapter_outputs_and_stats(tmp_path: Path) -> N
         index for index, call in enumerate(llm.calls) if call == ("drafting", "submit_scene_draft")
     ]
     assert scene_call_indices == sorted(scene_call_indices)
+    planning_inputs = [
+        input_text
+        for task_type, tool_name, input_text in llm.inputs
+        if task_type == "chapter_planning" and tool_name == "propose_chapter_plan"
+    ]
+    assert planning_inputs
+    assert "原文片段" in planning_inputs[0]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_cold_start_upgrades_shallow_thread_sources(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config_with_cold_start(config)
+    llm = FakeToolLLM()
+
+    summary = await InklinkPipeline(llm=llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+        )
+    )
+
+    extraction_inputs = [
+        input_text
+        for task_type, tool_name, input_text in llm.inputs
+        if task_type == "chapter_extraction" and tool_name == "record_chapter_analysis"
+    ]
+    assert any(
+        '"depth": "shallow"' in item and '"chapter_number": 1' in item for item in extraction_inputs
+    )
+    assert any(
+        '"upgrade_from": "shallow"' in item and '"chapter_number": 1' in item
+        for item in extraction_inputs
+    )
+    assert summary.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_summary_aggregates_optional_usage_fields(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+    llm = DetailedUsageLLM()
+
+    summary = await InklinkPipeline(llm=llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+        )
+    )
+
+    assert summary.stats.total.calls == len(llm.calls)
+    assert summary.stats.total.cached_tokens == 4 * len(llm.calls)
+    assert summary.stats.total.reasoning_tokens == 2 * len(llm.calls)
+    assert summary.stats.total.cache_read_tokens == 3 * len(llm.calls)
+    assert summary.stats.total.cache_write_tokens == len(llm.calls)
+    assert summary.stats.by_profile["default"].cache_read_tokens == 3 * len(llm.calls)
+    assert summary.stats.by_model["fake-model"].reasoning_tokens == 2 * len(llm.calls)
+    assert summary.stats.by_task["drafting"].cache_write_tokens is not None
+    run_summary = json.loads(
+        (summary.log_dir / "artifacts" / "run_summary.json").read_text(encoding="utf-8")
+    )
+    assert run_summary["stats"]["total"]["cached_tokens"] == 4 * len(llm.calls)
+    assert run_summary["stats"]["total"]["cache_read_tokens"] == 3 * len(llm.calls)
+    assert run_summary["stats"]["total"]["reasoning_tokens"] == 2 * len(llm.calls)
 
 
 @pytest.mark.asyncio
@@ -609,7 +756,7 @@ async def test_pipeline_pauses_when_review_failure_needs_approval(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_pipeline_writeback_refuses_existing_target(tmp_path: Path) -> None:
+async def test_pipeline_writeback_pauses_existing_target(tmp_path: Path) -> None:
     novel = tmp_path / "novel"
     novel.mkdir()
     write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
@@ -618,17 +765,75 @@ async def test_pipeline_writeback_refuses_existing_target(tmp_path: Path) -> Non
     config = tmp_path / "config.toml"
     write_config(config)
 
-    with pytest.raises(FileExistsError, match="writeback target already exists"):
-        await InklinkPipeline(llm=FakeToolLLM()).run(
-            GenerationOptions(
-                input_dir=novel,
-                config_path=config,
-                log_root=tmp_path / "logs",
-                output_mode="writeback",
-                chapter_count=1,
-                min_chars=8,
-                max_chars=80,
-                auto_approve=True,
-                start_chapter=3,
-            )
+    summary = await InklinkPipeline(llm=FakeToolLLM()).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            output_mode="writeback",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+            start_chapter=3,
         )
+    )
+
+    assert summary.status == "waiting_write_output"
+    assert summary.waiting_node_id == "write_output:3"
+    pending = summary.log_dir / "outputs" / "pending_writeback" / "3.txt"
+    assert pending.is_file()
+    from inklink.storage.sqlite import StateStore
+
+    with StateStore.open(summary.log_dir / "state.sqlite") as store:
+        node = store.get_node("write_output:3")
+
+    assert node["status"] == "waiting"
+    assert "writeback target already exists" in str(node["waiting_reason"])
+
+
+@pytest.mark.asyncio
+async def test_pipeline_writeback_resume_flushes_pending_target(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    write_chapter(novel / "3.txt", "第三章", "已经存在。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+    log_root = tmp_path / "logs"
+
+    paused = await InklinkPipeline(llm=FakeToolLLM()).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=log_root,
+            output_mode="writeback",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+            start_chapter=3,
+        )
+    )
+    (novel / "3.txt").unlink()
+
+    resumed_llm = FakeToolLLM(draft_body="这段不应重新生成。")
+    resumed = await InklinkPipeline(llm=resumed_llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=log_root,
+            runtime_id=paused.runtime_id,
+            output_mode="writeback",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+            start_chapter=3,
+        )
+    )
+
+    assert resumed.status == "completed"
+    assert (novel / "3.txt").read_text(encoding="utf-8").startswith("title: 第三章 青灯")
+    assert resumed_llm.calls == []

@@ -45,6 +45,10 @@ class UsageStatRow:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
 
 @dataclass
@@ -426,6 +430,22 @@ class WorkflowService:
                 input_tokens=current.input_tokens + parsed.get("input_tokens", 0),
                 output_tokens=current.output_tokens + parsed.get("output_tokens", 0),
                 total_tokens=current.total_tokens + parsed.get("total_tokens", 0),
+                reasoning_tokens=_add_optional_tokens(
+                    current.reasoning_tokens,
+                    parsed.get("reasoning_tokens"),
+                ),
+                cached_tokens=_add_optional_tokens(
+                    current.cached_tokens,
+                    parsed.get("cached_tokens"),
+                ),
+                cache_read_tokens=_add_optional_tokens(
+                    current.cache_read_tokens,
+                    parsed.get("cache_read_tokens"),
+                ),
+                cache_write_tokens=_add_optional_tokens(
+                    current.cache_write_tokens,
+                    parsed.get("cache_write_tokens"),
+                ),
             )
         return [grouped[key] for key in sorted(grouped)]
 
@@ -525,6 +545,12 @@ def _parse_usage_json(value: object) -> dict[str, int]:
         if isinstance(item, int) and not isinstance(item, bool):
             parsed[key] = item
     return parsed
+
+
+def _add_optional_tokens(current: int | None, value: int | None) -> int | None:
+    if value is None:
+        return current
+    return (current or 0) + value
 
 
 __all__ = [

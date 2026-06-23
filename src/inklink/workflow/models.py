@@ -10,8 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class NodeState(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    WAITING = "waiting"
     COMPLETED = "completed"
     FAILED = "failed"
+    INVALIDATED = "invalidated"
 
 
 class WorkflowNode(BaseModel):

@@ -23,18 +23,21 @@ Inklink 从 `config.toml` 读取配置，示例见仓库根目录的 `config.tom
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `runtime.output_mode` | `"output"` 或 `"writeback"` | `"output"` | `output` 表示输出到 `logs/<runtime_id>/outputs/chapters/`，不修改原章节目录；`writeback` 写回输入目录的目标章节号，若目标文件已存在会拒绝覆盖。 |
+| `runtime.output_mode` | `"output"` 或 `"writeback"` | `"output"` | `output` 表示输出到 `logs/<runtime_id>/outputs/chapters/`，不修改原章节目录；`writeback` 写回输入目录的目标章节号，若目标文件已存在会写入 `pending_writeback` 并等待用户处理后 resume。 |
 | `runtime.save_full_prompts` | bool | `true` | 是否保存完整 prompt。开启后便于断点续接和排查，但日志可能包含小说正文、设定和审批聊天内容。 |
 
 ## writing
 
-当前 pipeline 已使用字数区间、自动修订轮数和轻量检索预算裁剪。检索预算当前以字符数近似 token 预算，用确定性优先级裁剪注入上下文；后续可替换为真实 tokenizer 与更完整检索层。
+当前 pipeline 已使用字数区间、自动修订轮数、分段区间摘要和轻量检索预算裁剪。检索预算当前以字符数近似 token 预算，用确定性优先级裁剪故事状态、结构化索引和原文片段；后续可替换为真实 tokenizer。
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `writing.word_count_tolerance_ratio` | float，`0..1` | `0.1` | 中文字数容差比例。当前中文字数统计只计入 Python `unicodedata` 识别到的 CJK 统一表意文字及扩展区；标点、空格、换行、阿拉伯数字、拉丁字母和未分配码位不计入。 |
-| `writing.retrieval_token_budget` | 正整数或空字符串 | `None` | 留空不裁剪；填写正整数后，pipeline 会按确定性优先级裁剪故事状态、伏笔、人物、世界观和近期章节摘要。当前预算单位是字符近似值。 |
+| `writing.retrieval_token_budget` | 正整数或空字符串 | `None` | 留空不裁剪；填写正整数后，pipeline 会按确定性优先级裁剪故事状态、伏笔、人物、世界观、近期章节摘要和结构化索引命中的原文片段。当前预算单位是字符近似值。 |
 | `writing.max_revision_rounds` | 非负整数 | `3` | 当前 pipeline 使用该值控制单章最大自动修订轮数。确定性检查失败会直接进入 revision，检查通过后才运行 LLM review。 |
+| `writing.range_summary_chapter_span` | 正整数 | `50` | 每多少章生成一个 `summarize_range[*]` 区间摘要；初次导入和运行中生成章节共用该阈值逻辑。 |
+| `writing.story_merge_recent_chapters` | 非负整数 | `20` | `merge_story_state` 额外注入最近多少章单章分析；较早内容通过结构化索引和区间摘要进入上下文。 |
+| `writing.refresh_range_summary_after_generation` | bool | `true` | 连续生成多章时，生成章节集成后刷新所在区间摘要。 |
 
 ## approvals
 
@@ -52,7 +55,7 @@ Inklink 从 `config.toml` 读取配置，示例见仓库根目录的 `config.tom
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `cold_start.enabled` | bool | `false` | 是否启用历史章节冷启动分析。开启后 pipeline 会把较早章节标记为 `shallow` 分析，最近章节标记为 `deep`。 |
-| `cold_start.recent_chapters_to_deep_analyze` | 非负整数 | `50` | 冷启动开启时，最近多少章按 deep 分析；更早章节按 shallow 分析。shallow/deep 差异通过 prompt 输入传给模型，结构化字段仍要求尽量完整。 |
+| `cold_start.recent_chapters_to_deep_analyze` | 非负整数 | `50` | 冷启动开启时，最近多少章按 deep 分析；更早章节按 shallow 分析。shallow/deep 差异通过 prompt 输入传给模型，结构化字段仍要求尽量完整；若 shallow 伏笔缺少回收窗口等关键字段，pipeline 会自动 deep 重析来源章。 |
 
 ## models
 
@@ -112,3 +115,16 @@ review = "default"
 ```
 
 在这个例子中，`drafting` 使用 `models.draft`，`review` 使用 `models.default`，未写出的任务也回退到 `models.default`。
+
+## usage 统计
+
+每次真实 LLM 调用完成后，Inklink 会把归一化后的 usage 写入运行目录的 SQLite 状态库，并纳入本次 `PipelineSummary`。`uv run inklink run --execute ...` 结束时会展示：
+
+- `usage_total`
+- `usage_by_profile`
+- `usage_by_model`
+- `usage_by_task`
+
+`uv run inklink workflow stats <runtime_id>` 会读取已持久化记录，并按 `profile/model/task` 输出同一组 token 指标。基础字段始终包含 `calls`、`input`、`output`、`total`。
+
+Responses 和 Chat Completions 的 usage 字段会统一归一为 `input_tokens`、`output_tokens`、`total_tokens`、`cached_tokens`、`cache_read_tokens`、`cache_write_tokens`、`reasoning_tokens`。其中 `cached`、`cache_read`、`cache_write`、`reasoning` 只有在服务端 usage 中实际存在对应值时才显示；缺失字段不会被臆造为 0，服务端明确返回 0 时会保留并显示。

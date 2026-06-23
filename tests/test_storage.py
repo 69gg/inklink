@@ -105,6 +105,7 @@ def test_state_store_creates_schema_tables(tmp_path: Path) -> None:
         assert {
             "runs",
             "nodes",
+            "node_artifacts",
             "llm_calls",
             "tool_calls",
             "artifacts",
@@ -190,6 +191,8 @@ def test_state_store_records_run_and_nodes(tmp_path: Path) -> None:
             "idempotency_key": None,
             "input_version": None,
             "output_version": None,
+            "depends_on": [],
+            "waiting_reason": None,
             "error_summary": None,
         }
 
@@ -207,8 +210,29 @@ def test_state_store_upsert_node_updates_existing_row(tmp_path: Path) -> None:
             "idempotency_key": None,
             "input_version": None,
             "output_version": None,
+            "depends_on": [],
+            "waiting_reason": None,
             "error_summary": None,
         }
+
+
+def test_state_store_records_node_dependencies_and_waiting_reason(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        store.upsert_node(
+            node_id="write_output:3",
+            node_type="write_output",
+            status="waiting",
+            depends_on=["integrate_generated_chapter:3", "check_chapter:3"],
+            waiting_reason="writeback target exists",
+            input_version="chapter_draft:3@1",
+        )
+
+        node = store.get_node("write_output:3")
+
+        assert node["status"] == "waiting"
+        assert node["depends_on"] == ["check_chapter:3", "integrate_generated_chapter:3"]
+        assert node["waiting_reason"] == "writeback target exists"
+        assert node["input_version"] == "chapter_draft:3@1"
 
 
 def test_state_store_raises_key_error_for_missing_records(tmp_path: Path) -> None:

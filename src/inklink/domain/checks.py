@@ -216,8 +216,8 @@ def _check_repeated_plot_thread_resolution(
     resolved_thread_ids: list[str],
     issues: list[CheckIssue],
 ) -> None:
-    repeated = set(resolved_thread_ids)
-    for thread in plot_threads:
+    repeated = {thread_id for thread_id in resolved_thread_ids if thread_id.strip()}
+    for thread in _latest_plot_threads(plot_threads):
         if thread.thread_id in repeated and thread.status in {
             PlotThreadStatus.RESOLVED,
             PlotThreadStatus.ABANDONED,
@@ -243,6 +243,41 @@ def _check_repeated_plot_thread_resolution(
                     severity="warning",
                 )
             )
+
+
+def _latest_plot_threads(plot_threads: list[PlotThread]) -> list[PlotThread]:
+    by_thread_id: dict[str, PlotThread] = {}
+    for thread in sorted(
+        plot_threads,
+        key=lambda item: (
+            item.thread_id,
+            _plot_thread_lifecycle_chapter(item),
+            _plot_thread_status_rank(item.status),
+            item.description,
+        ),
+    ):
+        by_thread_id[thread.thread_id] = thread
+    return [by_thread_id[thread_id] for thread_id in sorted(by_thread_id)]
+
+
+def _plot_thread_status_rank(status: PlotThreadStatus) -> int:
+    ranks: dict[PlotThreadStatus, int] = {
+        PlotThreadStatus.SEEDED: 1,
+        PlotThreadStatus.REINFORCED: 2,
+        PlotThreadStatus.DUE: 3,
+        PlotThreadStatus.RESOLVED: 4,
+        PlotThreadStatus.ABANDONED: 5,
+    }
+    return ranks[status]
+
+
+def _plot_thread_lifecycle_chapter(thread: PlotThread) -> int:
+    return (
+        thread.resolved_chapter
+        or thread.abandoned_chapter
+        or thread.due_chapter
+        or thread.source_chapter
+    )
 
 
 def _range_with_tolerance(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -19,9 +19,21 @@ CREATE TABLE IF NOT EXISTS nodes (
   idempotency_key TEXT,
   input_version TEXT,
   output_version TEXT,
+  depends_on_json TEXT NOT NULL DEFAULT '[]',
+  waiting_reason TEXT,
   error_summary TEXT,
   started_at TEXT,
   finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS node_artifacts (
+  node_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  artifact_version INTEGER NOT NULL,
+  direction TEXT NOT NULL CHECK(direction IN ('input', 'output')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(node_id, artifact_id, artifact_version, direction),
+  FOREIGN KEY(node_id) REFERENCES nodes(node_id)
 );
 
 CREATE TABLE IF NOT EXISTS llm_calls (

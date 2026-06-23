@@ -262,6 +262,8 @@ class PlotThread(BaseModel):
     status: PlotThreadStatus
     source_chapter: int = Field(strict=True, gt=0)
     due_chapter: int | None = Field(default=None, strict=True, gt=0)
+    resolved_chapter: int | None = Field(default=None, strict=True, gt=0)
+    abandoned_chapter: int | None = Field(default=None, strict=True, gt=0)
     related_keywords: list[str] = Field(default_factory=list)
 
     @field_validator("thread_id", "description")
@@ -273,6 +275,14 @@ class PlotThread(BaseModel):
     @classmethod
     def validate_related_keywords(cls, values: list[str]) -> list[str]:
         return _validate_non_blank_list(values)
+
+    @model_validator(mode="after")
+    def validate_lifecycle_chapters(self) -> Self:
+        if self.resolved_chapter is not None and self.status != PlotThreadStatus.RESOLVED:
+            raise ValueError("resolved_chapter requires resolved status")
+        if self.abandoned_chapter is not None and self.status != PlotThreadStatus.ABANDONED:
+            raise ValueError("abandoned_chapter requires abandoned status")
+        return self
 
 
 class WorldbuildingFacts(BaseModel):

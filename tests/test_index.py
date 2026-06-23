@@ -1,7 +1,15 @@
 import pytest
 from pydantic import ValidationError
 
-from inklink.domain.index import CharacterIndexEntry, EntityMention, StoryIndex, StructuredFact
+from inklink.domain.index import (
+    CharacterIndexEntry,
+    CharacterStatus,
+    EntityMention,
+    StoryIndex,
+    StructuredFact,
+    facts_from_chapter_analysis,
+)
+from inklink.domain.models import PlotThreadStatus
 
 
 def test_last_mentioned_is_order_independent() -> None:
@@ -281,6 +289,74 @@ def test_story_index_model_validate_ignores_stale_characters() -> None:
     assert index.characters["c1"].related_chapters == [8]
 
 
+def test_story_index_model_validate_ignores_stale_typed_views() -> None:
+    index = StoryIndex.model_validate(
+        {
+            "facts": [
+                {
+                    "fact_id": "thread-1:seed",
+                    "kind": "plot_thread",
+                    "text": "旧钥匙来历",
+                    "chapter_number": 3,
+                    "generation": 1,
+                    "priority": 2,
+                    "keywords": ["旧钥匙"],
+                    "payload": {"thread_id": "thread-1", "source_chapter": 3},
+                }
+            ],
+            "plot_threads": {
+                "stale": {
+                    "thread_id": "stale",
+                    "description": "不应保留",
+                    "status": "resolved",
+                    "source_chapter": 1,
+                    "reinforced_chapters": [],
+                    "resolution_window": None,
+                    "resolved_chapter": 1,
+                    "related_entities": [],
+                    "keywords": [],
+                    "importance": 1,
+                }
+            },
+            "events": {
+                "stale-event": {
+                    "event_id": "stale-event",
+                    "description": "不应保留",
+                    "chapter_number": 1,
+                    "related_entities": [],
+                    "keywords": [],
+                    "importance": 1,
+                }
+            },
+            "world_rules": {
+                "stale-rule": {
+                    "rule_id": "stale-rule",
+                    "description": "不应保留",
+                    "source_chapter": 1,
+                    "related_entities": [],
+                    "keywords": [],
+                    "importance": 1,
+                }
+            },
+            "keywords": {
+                "stale": {
+                    "keyword": "stale",
+                    "kinds": ["event"],
+                    "related_fact_ids": ["stale-event"],
+                    "related_entities": [],
+                    "related_chapters": [1],
+                    "importance": 1,
+                }
+            },
+        }
+    )
+
+    assert set(index.plot_threads) == {"thread-1"}
+    assert index.events == {}
+    assert index.world_rules == {}
+    assert "stale" not in index.keywords
+
+
 def test_story_index_model_validate_rebuilds_with_abandoned_generations() -> None:
     index = StoryIndex.model_validate(
         {
@@ -378,6 +454,36 @@ def test_story_index_json_round_trip_is_stable() -> None:
     assert restored.model_dump() == index.model_dump()
 
 
+def test_story_index_structured_fact_payload_round_trip_rebuilds_typed_views() -> None:
+    index = StoryIndex(
+        facts=[
+            StructuredFact(
+                fact_id="thread-1",
+                kind="plot_thread",
+                text="旧钥匙尚未解释",
+                chapter_number=3,
+                generation=1,
+                priority=2,
+                keywords=["旧钥匙"],
+                payload={
+                    "thread_id": "thread-1",
+                    "description": "旧钥匙尚未解释",
+                    "status": "reinforced",
+                    "source_chapter": 1,
+                    "due_chapter": 5,
+                    "related_entities": ["林青"],
+                },
+            )
+        ]
+    )
+
+    restored = StoryIndex.model_validate_json(index.model_dump_json())
+
+    assert restored.plot_threads["thread-1"].status == PlotThreadStatus.REINFORCED
+    assert restored.plot_threads["thread-1"].resolution_window is not None
+    assert restored.plot_threads["thread-1"].resolution_window.end_chapter == 5
+
+
 def test_story_index_structured_facts_are_generation_aware_and_retrievable() -> None:
     index = StoryIndex()
     index.upsert_facts(
@@ -407,3 +513,187 @@ def test_story_index_structured_facts_are_generation_aware_and_retrievable() -> 
     items = index.retrieval_items(keywords=["旧钥匙"])
 
     assert [item["text"] for item in items] == ["青灯会回应钥匙"]
+
+
+def test_story_index_builds_typed_views_from_active_structured_facts() -> None:
+    index = StoryIndex()
+    index.upsert_mentions(
+        [
+            EntityMention(entity_id="林青", chapter_number=1, generation=1, strength=2),
+            EntityMention(entity_id="林青", chapter_number=2, generation=1, strength=4),
+        ]
+    )
+    index.upsert_facts(
+        [
+            StructuredFact(
+                fact_id="character:lin-qing",
+                kind="keyword",
+                text="林青改用青衣客身份行动",
+                chapter_number=2,
+                generation=1,
+                priority=3,
+                keywords=["青衣客"],
+                payload={
+                    "entity_id": "林青",
+                    "aliases": ["青衣客", "林青"],
+                    "character_status": "active",
+                },
+            ),
+            StructuredFact(
+                fact_id="thread-1:seed",
+                kind="plot_thread",
+                text="旧钥匙来历",
+                chapter_number=1,
+                generation=1,
+                priority=2,
+                keywords=["旧钥匙"],
+                payload={
+                    "thread_id": "thread-1",
+                    "description": "旧钥匙来历",
+                    "status": "seeded",
+                    "source_chapter": 1,
+                    "resolution_start_chapter": 2,
+                    "resolution_end_chapter": 4,
+                    "related_entities": ["林青"],
+                    "importance": 2,
+                },
+            ),
+            StructuredFact(
+                fact_id="thread-1:reinforce",
+                kind="plot_thread",
+                text="旧钥匙再次发烫",
+                chapter_number=3,
+                generation=1,
+                priority=1,
+                keywords=["旧钥匙", "青灯"],
+                payload={
+                    "thread_id": "thread-1",
+                    "description": "旧钥匙开始回应青灯",
+                    "status": "reinforced",
+                    "source_chapter": 1,
+                    "reinforced_chapters": [2, 3],
+                    "related_entities": ["林青"],
+                    "importance": 1,
+                },
+            ),
+            StructuredFact(
+                fact_id="world-1",
+                kind="worldbuilding",
+                text="青灯只回应旧钥匙",
+                chapter_number=2,
+                generation=1,
+                priority=4,
+                keywords=["青灯"],
+                payload={
+                    "description": "青灯只回应旧钥匙",
+                    "source_chapter": 2,
+                    "related_entities": ["林青"],
+                    "importance": 4,
+                },
+            ),
+            StructuredFact(
+                fact_id="event-1",
+                kind="event",
+                text="门后传来陌生脚步",
+                chapter_number=3,
+                generation=1,
+                priority=3,
+                keywords=["门后"],
+                payload={
+                    "description": "门后传来陌生脚步",
+                    "related_entities": ["林青"],
+                    "importance": 3,
+                },
+            ),
+        ]
+    )
+
+    character = index.characters["林青"]
+    thread = index.plot_threads["thread-1"]
+
+    assert character.aliases == ["林青", "青衣客"]
+    assert character.status == CharacterStatus.ACTIVE
+    assert character.active_score == 6
+    assert thread.description == "旧钥匙开始回应青灯"
+    assert thread.status == PlotThreadStatus.REINFORCED
+    assert thread.source_chapter == 1
+    assert thread.reinforced_chapters == [2, 3]
+    assert thread.resolution_window is not None
+    assert thread.resolution_window.start_chapter == 2
+    assert thread.resolution_window.end_chapter == 4
+    assert thread.related_entities == ["林青"]
+    assert thread.keywords == ["旧钥匙", "旧钥匙再次发烫", "旧钥匙来历", "青灯"]
+    assert index.world_rules["world-1"].description == "青灯只回应旧钥匙"
+    assert index.events["event-1"].chapter_number == 3
+    assert index.keywords["青灯"].related_fact_ids == ["thread-1:reinforce", "world-1"]
+
+
+def test_story_index_typed_views_drop_abandoned_generation_contributions() -> None:
+    index = StoryIndex()
+    index.upsert_facts(
+        [
+            StructuredFact(
+                fact_id="thread-1",
+                kind="plot_thread",
+                text="旧钥匙来历",
+                chapter_number=5,
+                generation=1,
+                priority=2,
+                keywords=["旧钥匙"],
+                payload={
+                    "thread_id": "thread-1",
+                    "status": "resolved",
+                    "resolved_chapter": 5,
+                    "source_chapter": 1,
+                },
+            ),
+            StructuredFact(
+                fact_id="world-1",
+                kind="worldbuilding",
+                text="青灯会回应钥匙",
+                chapter_number=5,
+                generation=1,
+                priority=4,
+                keywords=["青灯"],
+            ),
+            StructuredFact(
+                fact_id="thread-1",
+                kind="plot_thread",
+                text="旧钥匙仍未解释",
+                chapter_number=5,
+                generation=2,
+                priority=2,
+                keywords=["旧钥匙"],
+                payload={
+                    "thread_id": "thread-1",
+                    "status": "reinforced",
+                    "source_chapter": 1,
+                },
+            ),
+        ]
+    )
+
+    index.abandon_generation(chapter_number=5, generation=1)
+    thread = index.plot_threads["thread-1"]
+
+    assert thread.status == PlotThreadStatus.REINFORCED
+    assert thread.resolved_chapter is None
+    assert "world-1" not in index.world_rules
+    assert index.keywords["旧钥匙"].related_chapters == [5]
+
+
+def test_facts_from_chapter_analysis_adds_compatible_typed_payloads() -> None:
+    facts = facts_from_chapter_analysis(
+        chapter_number=7,
+        generation=2,
+        worldbuilding=["青灯只在雨夜点亮"],
+        plot_threads=["旧钥匙为何发烫"],
+        suspense=["门后的人没有影子"],
+    )
+    index = StoryIndex(facts=facts)
+
+    assert {fact.kind for fact in facts} == {"worldbuilding", "plot_thread", "event"}
+    assert facts[0].payload["source_chapter"] == 7
+    assert index.world_rules["worldbuilding:7:0"].source_chapter == 7
+    assert index.plot_threads["plot_thread:7:0"].status == PlotThreadStatus.SEEDED
+    assert index.events["event:7:0"].description == "门后的人没有影子"

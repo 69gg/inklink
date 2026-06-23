@@ -14,8 +14,9 @@ from inklink.workflow.pipeline import (
     InklinkPipeline,
     OpenAIToolLLM,
     PipelineSummary,
+    UsageBucket,
 )
-from inklink.workflow.service import WorkflowService
+from inklink.workflow.service import UsageStatRow, WorkflowService
 
 app = typer.Typer(help="墨连 Inklink: AI-driven Chinese novel continuation TUI.")
 workflow_app = typer.Typer(help="Operate an existing Inklink workflow runtime.")
@@ -122,22 +123,53 @@ async def _run_pipeline(
 
 
 def _print_usage_summary(summary: PipelineSummary) -> None:
+    typer.echo("usage_total:")
+    typer.echo(f"  {_format_usage_bucket('total', summary.stats.total)}")
+    if summary.stats.by_profile:
+        typer.echo("usage_by_profile:")
+        for profile, bucket in sorted(summary.stats.by_profile.items()):
+            typer.echo(f"  {_format_usage_bucket(profile, bucket)}")
     if summary.stats.by_model:
         typer.echo("usage_by_model:")
         for model, bucket in sorted(summary.stats.by_model.items()):
-            typer.echo(
-                "  "
-                f"{model}: calls={bucket.calls} input={bucket.input_tokens} "
-                f"output={bucket.output_tokens} total={bucket.total_tokens}"
-            )
+            typer.echo(f"  {_format_usage_bucket(model, bucket)}")
     if summary.stats.by_task:
         typer.echo("usage_by_task:")
         for task, bucket in sorted(summary.stats.by_task.items()):
-            typer.echo(
-                "  "
-                f"{task}: calls={bucket.calls} input={bucket.input_tokens} "
-                f"output={bucket.output_tokens} total={bucket.total_tokens}"
-            )
+            typer.echo(f"  {_format_usage_bucket(task, bucket)}")
+
+
+def _format_usage_bucket(label: str, bucket: UsageBucket) -> str:
+    parts = [
+        f"{label}: calls={bucket.calls}",
+        f"input={bucket.input_tokens}",
+        f"output={bucket.output_tokens}",
+        f"total={bucket.total_tokens}",
+    ]
+    _append_optional_usage(parts, "cached", bucket.cached_tokens)
+    _append_optional_usage(parts, "cache_read", bucket.cache_read_tokens)
+    _append_optional_usage(parts, "cache_write", bucket.cache_write_tokens)
+    _append_optional_usage(parts, "reasoning", bucket.reasoning_tokens)
+    return " ".join(parts)
+
+
+def _format_usage_row(row: UsageStatRow) -> str:
+    parts = [
+        f"{row.profile}/{row.model}/{row.task_type}: calls={row.calls}",
+        f"input={row.input_tokens}",
+        f"output={row.output_tokens}",
+        f"total={row.total_tokens}",
+    ]
+    _append_optional_usage(parts, "cached", row.cached_tokens)
+    _append_optional_usage(parts, "cache_read", row.cache_read_tokens)
+    _append_optional_usage(parts, "cache_write", row.cache_write_tokens)
+    _append_optional_usage(parts, "reasoning", row.reasoning_tokens)
+    return " ".join(parts)
+
+
+def _append_optional_usage(parts: list[str], label: str, value: int | None) -> None:
+    if value is not None:
+        parts.append(f"{label}={value}")
 
 
 @workflow_app.command("info")
@@ -167,10 +199,7 @@ def workflow_stats(
             typer.echo("no usage rows")
             return
         for row in rows:
-            typer.echo(
-                f"{row.profile}/{row.model}/{row.task_type}: calls={row.calls} "
-                f"input={row.input_tokens} output={row.output_tokens} total={row.total_tokens}"
-            )
+            typer.echo(_format_usage_row(row))
 
 
 @workflow_app.command("nodes")

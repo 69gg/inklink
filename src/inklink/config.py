@@ -23,6 +23,9 @@ class WritingConfig(BaseModel):
     word_count_tolerance_ratio: float = Field(default=0.1, ge=0, le=1)
     retrieval_token_budget: int | None = Field(default=None, gt=0)
     max_revision_rounds: int = Field(default=3, ge=0)
+    range_summary_chapter_span: int = Field(default=50, gt=0)
+    story_merge_recent_chapters: int = Field(default=20, ge=0)
+    refresh_range_summary_after_generation: bool = True
 
 
 class ApprovalConfig(BaseModel):

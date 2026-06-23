@@ -4,18 +4,23 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from inklink.atomic import atomic_write_text
 from inklink.chapters import Chapter, load_chapters
 from inklink.config import AppConfig, ModelProfile, load_config
 from inklink.domain.checks import run_chapter_checks
-from inklink.domain.index import EntityMention, StoryIndex, StructuredFact
+from inklink.domain.index import (
+    EntityMention,
+    StoryIndex,
+    StructuredFact,
+    facts_from_chapter_analysis,
+)
 from inklink.domain.models import (
     ChapterAnalysis,
     ChapterContract,
@@ -25,6 +30,7 @@ from inklink.domain.models import (
     DraftChapter,
     OutlineProposal,
     OutlineUpdate,
+    PlotThread,
     RangeSummary,
     SceneDraft,
     ScenePlan,
@@ -64,6 +70,14 @@ class ReviewFailureApprovalRequired(RuntimeError):
         super().__init__(f"review failure approval required for chapter {chapter_number}")
         self.chapter_number = chapter_number
         self.issues = list(issues)
+
+
+class WriteOutputApprovalRequired(RuntimeError):
+    def __init__(self, *, chapter_number: int, target: Path, pending_file: Path) -> None:
+        super().__init__(f"write output approval required for chapter {chapter_number}")
+        self.chapter_number = chapter_number
+        self.target = target
+        self.pending_file = pending_file
 
 
 class ToolCallResult(BaseModel):
@@ -161,35 +175,74 @@ class UsageBucket(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
-    reasoning_tokens: int = 0
-    cached_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
     def add(self, usage: NormalizedUsage) -> None:
         self.calls += 1
         self.input_tokens += usage.input_tokens or 0
         self.output_tokens += usage.output_tokens or 0
         self.total_tokens += usage.total_tokens or 0
-        self.reasoning_tokens += usage.reasoning_tokens or 0
-        self.cached_tokens += usage.cached_tokens or 0
-        self.cache_read_tokens += usage.cache_read_tokens or 0
-        self.cache_write_tokens += usage.cache_write_tokens or 0
+        self.reasoning_tokens = _add_optional_tokens(
+            self.reasoning_tokens,
+            usage.reasoning_tokens,
+        )
+        self.cached_tokens = _add_optional_tokens(self.cached_tokens, usage.cached_tokens)
+        self.cache_read_tokens = _add_optional_tokens(
+            self.cache_read_tokens,
+            usage.cache_read_tokens,
+        )
+        self.cache_write_tokens = _add_optional_tokens(
+            self.cache_write_tokens,
+            usage.cache_write_tokens,
+        )
 
 
 class RunStats(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     total_calls: int = 0
+    total: UsageBucket = Field(default_factory=UsageBucket)
     by_profile: dict[str, UsageBucket] = Field(default_factory=dict)
     by_model: dict[str, UsageBucket] = Field(default_factory=dict)
     by_task: dict[str, UsageBucket] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_optional_zeros(cls, data: object) -> object:
+        if not isinstance(data, dict) or "total" in data:
+            return data
+        normalized = dict(data)
+        for key in ("by_profile", "by_model", "by_task"):
+            buckets = normalized.get(key)
+            if isinstance(buckets, dict):
+                normalized[key] = {
+                    bucket_key: _drop_legacy_optional_zero_usage(bucket)
+                    for bucket_key, bucket in buckets.items()
+                }
+        return normalized
+
     def add(self, result: ToolCallResult) -> None:
         self.total_calls += 1
+        self.total.add(result.usage)
         _bucket(self.by_profile, result.profile_name).add(result.usage)
         _bucket(self.by_model, result.model).add(result.usage)
         _bucket(self.by_task, result.task_type).add(result.usage)
+
+    @model_validator(mode="after")
+    def fill_total_from_existing_buckets(self) -> RunStats:
+        if self.total.calls == 0 and self.total_calls > 0:
+            for buckets in (self.by_model, self.by_profile, self.by_task):
+                if buckets:
+                    self.total = _sum_usage_buckets(buckets.values())
+                    break
+            if self.total.calls == 0:
+                self.total.calls = self.total_calls
+        if self.total_calls == 0 and self.total.calls > 0:
+            self.total_calls = self.total.calls
+        return self
 
 
 class PipelineSummary(BaseModel):
@@ -202,6 +255,7 @@ class PipelineSummary(BaseModel):
     stats: RunStats
     status: str = "completed"
     waiting_approval_id: str | None = None
+    waiting_node_id: str | None = None
 
 
 class RetrievalItem(BaseModel):
@@ -316,6 +370,15 @@ class InklinkPipeline:
             store = StateStore.open(run.log_dir / "state.sqlite")
             try:
                 if options.runtime_id is not None:
+                    pending_summary = _resume_pending_write_output_summary(
+                        store=store,
+                        runtime_id=run.runtime_id,
+                        log_dir=run.log_dir,
+                        input_dir=run.input_dir,
+                        event_log=event_log,
+                    )
+                    if pending_summary is not None:
+                        return pending_summary
                     completed_summary = _resume_completed_summary(store)
                     if completed_summary is not None:
                         event_log.write(
@@ -329,9 +392,34 @@ class InklinkPipeline:
                 chapters = load_chapters(run.input_dir)
                 artifacts_dir = run.log_dir / "artifacts"
                 artifacts_dir.mkdir(parents=True, exist_ok=True)
+                store.upsert_node(
+                    node_id="load_project",
+                    node_type="load_project",
+                    status="completed",
+                    input_version=_hash_json(
+                        [
+                            {
+                                "number": chapter.number,
+                                "title": chapter.title,
+                                "body_hash": _hash_json(chapter.body),
+                            }
+                            for chapter in chapters
+                        ]
+                    ),
+                    output_version=f"chapters:{len(chapters)}",
+                )
 
                 analyses = await self._analyze_chapters(
                     chapters=chapters,
+                    config=config,
+                    runtime_id=run.runtime_id,
+                    store=store,
+                    stats=stats,
+                    event_log=event_log,
+                )
+                analyses = await self._upgrade_shallow_analyses_if_needed(
+                    chapters=chapters,
+                    analyses=analyses,
                     config=config,
                     runtime_id=run.runtime_id,
                     store=store,
@@ -353,24 +441,26 @@ class InklinkPipeline:
                     is_approved=True,
                 )
 
-                range_summary = await self._call_model(
+                range_summaries = await self._summarize_ranges(
+                    chapters=chapters,
+                    analyses=analyses,
                     config=config,
                     runtime_id=run.runtime_id,
                     store=store,
                     stats=stats,
                     event_log=event_log,
-                    task_type="range_summary",
-                    tool_spec=_TOOL_SPECS["record_range_summary"],
-                    input_payload={
-                        "chapters": [_chapter_payload(chapter) for chapter in chapters],
-                        "analyses": [analysis.model_dump(mode="json") for analysis in analyses],
-                    },
                 )
-                store.upsert_artifact(
-                    artifact_id="range_summary:1",
-                    artifact_type="range_summary",
-                    payload=range_summary.model_dump(mode="json"),
-                    is_approved=True,
+                store.upsert_node(
+                    node_id="merge_story_state",
+                    node_type="merge_story_state",
+                    status="running",
+                    depends_on=[
+                        f"summarize_range:{summary.start_chapter}-{summary.end_chapter}"
+                        for summary in range_summaries
+                    ],
+                    input_version=_hash_json(
+                        [summary.model_dump(mode="json") for summary in range_summaries]
+                    ),
                 )
                 story_state = await self._call_model(
                     config=config,
@@ -381,8 +471,16 @@ class InklinkPipeline:
                     task_type="story_merge",
                     tool_spec=_TOOL_SPECS["merge_story_state"],
                     input_payload={
-                        "range_summary": range_summary.model_dump(mode="json"),
-                        "analyses": [analysis.model_dump(mode="json") for analysis in analyses],
+                        "range_summaries": [
+                            summary.model_dump(mode="json") for summary in range_summaries
+                        ],
+                        "recent_analyses": [
+                            analysis.model_dump(mode="json")
+                            for analysis in analyses[-config.writing.story_merge_recent_chapters :]
+                        ],
+                        "story_index_projection": store.load_story_index().retrieval_items(
+                            max_items=50
+                        ),
                     },
                 )
                 _write_json(artifacts_dir / "story_state.json", story_state.model_dump(mode="json"))
@@ -392,15 +490,38 @@ class InklinkPipeline:
                     payload=story_state.model_dump(mode="json"),
                     is_approved=True,
                 )
+                store.upsert_node(
+                    node_id="merge_story_state",
+                    node_type="merge_story_state",
+                    status="completed",
+                    depends_on=[
+                        f"summarize_range:{summary.start_chapter}-{summary.end_chapter}"
+                        for summary in range_summaries
+                    ],
+                    output_version="story_state",
+                )
                 retrieval_context = _retrieval_context(
                     analyses=analyses,
                     story_state=story_state,
                     story_index=store.load_story_index(),
+                    chapters=chapters,
                     budget=config.writing.retrieval_token_budget,
                 )
 
                 outline_artifact = _approved_artifact_if_accepted(store, "outline", "outline")
                 if outline_artifact is None:
+                    store.upsert_node(
+                        node_id="plan_outline",
+                        node_type="plan_outline",
+                        status="running",
+                        depends_on=["merge_story_state"],
+                        input_version=_hash_json(
+                            {
+                                "story_state": story_state.model_dump(mode="json"),
+                                "chapter_count": options.chapter_count,
+                            }
+                        ),
+                    )
                     outline = await self._call_model(
                         config=config,
                         runtime_id=run.runtime_id,
@@ -427,6 +548,14 @@ class InklinkPipeline:
                         is_draft=not outline_auto,
                         is_approved=outline_auto,
                         approval_id="outline",
+                        source_node_id="plan_outline",
+                    )
+                    store.upsert_node(
+                        node_id="plan_outline",
+                        node_type="plan_outline",
+                        status="completed",
+                        depends_on=["merge_story_state"],
+                        output_version=f"outline@{outline_version}",
                     )
                     _record_approval(
                         event_log,
@@ -435,6 +564,14 @@ class InklinkPipeline:
                         outline_auto,
                         artifact_id="outline",
                         artifact_version=outline_version,
+                    )
+                    store.upsert_node(
+                        node_id="approve_outline",
+                        node_type="approve_outline",
+                        status="completed" if outline_auto else "waiting",
+                        depends_on=["plan_outline"],
+                        waiting_reason=None if outline_auto else "waiting for outline approval",
+                        output_version=f"outline@{outline_version}",
                     )
                     if not outline_auto:
                         return _pause_for_approval(
@@ -447,6 +584,13 @@ class InklinkPipeline:
                         )
                 else:
                     outline = _outline_from_artifact(outline_artifact)
+                    store.upsert_node(
+                        node_id="approve_outline",
+                        node_type="approve_outline",
+                        status="completed",
+                        depends_on=["plan_outline"],
+                        output_version=f"outline@{outline_artifact['version']}",
+                    )
                     event_log.write(
                         "approval_artifact_reused",
                         {
@@ -463,6 +607,21 @@ class InklinkPipeline:
                     "chapter_plan",
                 )
                 if chapter_plan_artifact is None:
+                    store.upsert_node(
+                        node_id="plan_chapters",
+                        node_type="plan_chapters",
+                        status="running",
+                        depends_on=["approve_outline"],
+                        input_version=_hash_json(
+                            {
+                                "outline": outline.model_dump(mode="json"),
+                                "start_chapter": options.start_chapter or len(chapters) + 1,
+                                "chapter_count": options.chapter_count,
+                                "min_chars": options.min_chars,
+                                "max_chars": options.max_chars,
+                            }
+                        ),
+                    )
                     chapter_plan = await self._call_model(
                         config=config,
                         runtime_id=run.runtime_id,
@@ -504,6 +663,14 @@ class InklinkPipeline:
                         is_draft=not chapter_plan_auto,
                         is_approved=chapter_plan_auto,
                         approval_id="chapter_plan",
+                        source_node_id="plan_chapters",
+                    )
+                    store.upsert_node(
+                        node_id="plan_chapters",
+                        node_type="plan_chapters",
+                        status="completed",
+                        depends_on=["approve_outline"],
+                        output_version=f"chapter_plan@{chapter_plan_version}",
                     )
                     _record_approval(
                         event_log,
@@ -512,6 +679,16 @@ class InklinkPipeline:
                         chapter_plan_auto,
                         artifact_id="chapter_plan",
                         artifact_version=chapter_plan_version,
+                    )
+                    store.upsert_node(
+                        node_id="approve_chapter_plan",
+                        node_type="approve_chapter_plan",
+                        status="completed" if chapter_plan_auto else "waiting",
+                        depends_on=["plan_chapters"],
+                        waiting_reason=(
+                            None if chapter_plan_auto else "waiting for chapter plan approval"
+                        ),
+                        output_version=f"chapter_plan@{chapter_plan_version}",
                     )
                     if not chapter_plan_auto:
                         return _pause_for_approval(
@@ -524,6 +701,13 @@ class InklinkPipeline:
                         )
                 else:
                     chapter_contracts = _chapter_contracts_from_artifact(chapter_plan_artifact)
+                    store.upsert_node(
+                        node_id="approve_chapter_plan",
+                        node_type="approve_chapter_plan",
+                        status="completed",
+                        depends_on=["plan_chapters"],
+                        output_version=f"chapter_plan@{chapter_plan_artifact['version']}",
+                    )
                     event_log.write(
                         "approval_artifact_reused",
                         {
@@ -564,12 +748,20 @@ class InklinkPipeline:
                         attempt=generation,
                     )
                     scene_plan_id = f"scene_plan:{contract.chapter_number}"
+                    plan_scenes_node_id = f"plan_scenes:{contract.chapter_number}"
                     scene_plan_artifact = _approved_artifact_if_accepted(
                         store,
                         scene_plan_id,
                         scene_plan_id,
                     )
                     if scene_plan_artifact is None:
+                        store.upsert_node(
+                            node_id=plan_scenes_node_id,
+                            node_type="plan_scenes",
+                            status="running",
+                            depends_on=["approve_chapter_plan"],
+                            input_version=_hash_json(contract.model_dump(mode="json")),
+                        )
                         scene_plan = await self._call_model(
                             config=config,
                             runtime_id=run.runtime_id,
@@ -597,6 +789,14 @@ class InklinkPipeline:
                             is_draft=not scene_plan_auto,
                             is_approved=scene_plan_auto,
                             approval_id=scene_plan_id,
+                            source_node_id=plan_scenes_node_id,
+                        )
+                        store.upsert_node(
+                            node_id=plan_scenes_node_id,
+                            node_type="plan_scenes",
+                            status="completed",
+                            depends_on=["approve_chapter_plan"],
+                            output_version=f"{scene_plan_id}@{scene_plan_version}",
                         )
                         _record_approval(
                             event_log,
@@ -605,6 +805,16 @@ class InklinkPipeline:
                             scene_plan_auto,
                             artifact_id=scene_plan_id,
                             artifact_version=scene_plan_version,
+                        )
+                        store.upsert_node(
+                            node_id=f"approve_scene_plan:{contract.chapter_number}",
+                            node_type="approve_scene_plan",
+                            status="completed" if scene_plan_auto else "waiting",
+                            depends_on=[plan_scenes_node_id],
+                            waiting_reason=(
+                                None if scene_plan_auto else "waiting for scene plan approval"
+                            ),
+                            output_version=f"{scene_plan_id}@{scene_plan_version}",
                         )
                         if not scene_plan_auto:
                             store.create_or_update_approval(
@@ -625,6 +835,13 @@ class InklinkPipeline:
                             )
                     else:
                         scene_plan = ScenePlan.model_validate(scene_plan_artifact["payload"])
+                        store.upsert_node(
+                            node_id=f"approve_scene_plan:{contract.chapter_number}",
+                            node_type="approve_scene_plan",
+                            status="completed",
+                            depends_on=[plan_scenes_node_id],
+                            output_version=f"{scene_plan_id}@{scene_plan_artifact['version']}",
+                        )
                         event_log.write(
                             "approval_artifact_reused",
                             {
@@ -673,6 +890,14 @@ class InklinkPipeline:
                             stats=stats,
                             approval_id=f"review_failure:{exc.chapter_number}",
                         )
+                    integrate_node_id = f"integrate_generated_chapter:{draft.chapter_number}"
+                    store.upsert_node(
+                        node_id=integrate_node_id,
+                        node_type="integrate_generated_chapter",
+                        status="running",
+                        depends_on=[f"chapter-{contract.chapter_number}"],
+                        input_version=_hash_json(draft.model_dump(mode="json")),
+                    )
                     generated_analysis = await self._call_model(
                         config=config,
                         runtime_id=run.runtime_id,
@@ -704,14 +929,47 @@ class InklinkPipeline:
                         artifact_type="chapter_analysis",
                         payload=generated_analysis.model_dump(mode="json"),
                         is_approved=True,
-                        source_node_id=f"chapter-{contract.chapter_number}",
+                        source_node_id=integrate_node_id,
                     )
-                    output_file = _write_chapter_output(
-                        run_log_dir=run.log_dir,
-                        input_dir=run.input_dir,
-                        output_mode=output_mode,
-                        draft=draft,
+                    analyses.append(generated_analysis)
+                    store.upsert_node(
+                        node_id=integrate_node_id,
+                        node_type="integrate_generated_chapter",
+                        status="completed",
+                        depends_on=[f"chapter-{contract.chapter_number}"],
+                        output_version=f"chapter_analysis:{draft.chapter_number}",
                     )
+                    if config.writing.refresh_range_summary_after_generation:
+                        await self._summarize_generated_window(
+                            draft=draft,
+                            analysis=generated_analysis,
+                            config=config,
+                            runtime_id=run.runtime_id,
+                            store=store,
+                            stats=stats,
+                            event_log=event_log,
+                        )
+                    try:
+                        output_file = _write_chapter_output(
+                            store=store,
+                            event_log=event_log,
+                            run_log_dir=run.log_dir,
+                            input_dir=run.input_dir,
+                            output_mode=output_mode,
+                            draft=draft,
+                            depends_on=[f"integrate_generated_chapter:{draft.chapter_number}"],
+                        )
+                    except WriteOutputApprovalRequired as exc:
+                        return _pause_for_write_output(
+                            runtime_id=run.runtime_id,
+                            log_dir=run.log_dir,
+                            store=store,
+                            event_log=event_log,
+                            stats=stats,
+                            chapter_number=exc.chapter_number,
+                            target=exc.target,
+                            pending_file=exc.pending_file,
+                        )
                     output_files.append(output_file)
                     generated_chapters.append(draft.chapter_number)
                     previous_generated_body = draft.body
@@ -766,6 +1024,40 @@ class InklinkPipeline:
 
         async def analyze_one(chapter: Chapter) -> ChapterAnalysis:
             depth = "deep" if chapter.number >= deep_start else "shallow"
+            node_id = f"analyze_chapter:{chapter.number}"
+            cached_artifact = store.get_latest_artifact(
+                f"chapter_analysis:{chapter.number}",
+                approved_only=True,
+            )
+            if cached_artifact is not None:
+                cached_output_version = (
+                    f"chapter_analysis:{chapter.number}@{cached_artifact['version']}|depth:{depth}"
+                )
+                try:
+                    existing_node = store.get_node(node_id)
+                    existing_output_version = existing_node.get("output_version")
+                    if (
+                        isinstance(existing_output_version, str)
+                        and "|depth:deep" in existing_output_version
+                    ):
+                        cached_output_version = existing_output_version
+                except KeyError:
+                    pass
+                store.upsert_node(
+                    node_id=node_id,
+                    node_type="analyze_chapter",
+                    status="completed",
+                    depends_on=["load_project"],
+                    output_version=cached_output_version,
+                )
+                return ChapterAnalysis.model_validate(cached_artifact["payload"])
+            store.upsert_node(
+                node_id=node_id,
+                node_type="analyze_chapter",
+                status="running",
+                depends_on=["load_project"],
+                input_version=_hash_json(_chapter_payload(chapter) | {"depth": depth}),
+            )
             analysis = await self._call_model(
                 config=config,
                 runtime_id=runtime_id,
@@ -782,17 +1074,255 @@ class InklinkPipeline:
                     "generation": 1,
                 },
             )
-            store.upsert_artifact(
+            version = store.upsert_artifact(
                 artifact_id=f"chapter_analysis:{chapter.number}",
                 artifact_type="chapter_analysis",
                 payload=analysis.model_dump(mode="json"),
                 is_approved=True,
-                source_node_id=f"analyze_chapter:{chapter.number}",
+                source_node_id=node_id,
+            )
+            store.upsert_node(
+                node_id=node_id,
+                node_type="analyze_chapter",
+                status="completed",
+                depends_on=["load_project"],
+                output_version=f"chapter_analysis:{chapter.number}@{version}|depth:{depth}",
             )
             return cast(ChapterAnalysis, analysis)
 
         analyses = await asyncio.gather(*(analyze_one(chapter) for chapter in chapters))
         return sorted(analyses, key=lambda analysis: analysis.chapter_number)
+
+    async def _upgrade_shallow_analyses_if_needed(
+        self,
+        *,
+        chapters: list[Chapter],
+        analyses: list[ChapterAnalysis],
+        config: AppConfig,
+        runtime_id: str,
+        store: StateStore,
+        stats: RunStats,
+        event_log: JsonlEventLog,
+    ) -> list[ChapterAnalysis]:
+        if not config.cold_start.enabled:
+            return analyses
+        deep_start = _deep_analysis_start(chapters, config)
+        analyses_by_number = {analysis.chapter_number: analysis for analysis in analyses}
+        chapters_by_number = {chapter.number: chapter for chapter in chapters}
+        for analysis in list(analyses):
+            if analysis.chapter_number >= deep_start:
+                continue
+            if _analysis_node_is_deep(store, analysis.chapter_number):
+                continue
+            if not _analysis_needs_deep_upgrade(analysis):
+                continue
+            chapter = chapters_by_number.get(analysis.chapter_number)
+            if chapter is None:
+                continue
+            node_id = f"analyze_chapter:{chapter.number}"
+            event_log.write(
+                "analysis_deep_upgrade_requested",
+                {
+                    "chapter_number": chapter.number,
+                    "reason": "shallow structured fields need richer payload",
+                },
+            )
+            upgraded = await self._call_model(
+                config=config,
+                runtime_id=runtime_id,
+                store=store,
+                stats=stats,
+                event_log=event_log,
+                task_type="chapter_extraction",
+                tool_spec=_TOOL_SPECS["record_chapter_analysis"],
+                input_payload={
+                    "chapter_number": chapter.number,
+                    "title": chapter.title,
+                    "body": chapter.body,
+                    "depth": "deep",
+                    "generation": 1,
+                    "upgrade_from": "shallow",
+                },
+            )
+            version = store.upsert_artifact(
+                artifact_id=f"chapter_analysis:{chapter.number}",
+                artifact_type="chapter_analysis",
+                payload=upgraded.model_dump(mode="json"),
+                is_approved=True,
+                source_node_id=node_id,
+            )
+            store.upsert_node(
+                node_id=node_id,
+                node_type="analyze_chapter",
+                status="completed",
+                depends_on=["load_project"],
+                output_version=f"chapter_analysis:{chapter.number}@{version}|depth:deep",
+            )
+            analyses_by_number[chapter.number] = cast(ChapterAnalysis, upgraded)
+        return [analyses_by_number[number] for number in sorted(analyses_by_number)]
+
+    async def _summarize_ranges(
+        self,
+        *,
+        chapters: list[Chapter],
+        analyses: list[ChapterAnalysis],
+        config: AppConfig,
+        runtime_id: str,
+        store: StateStore,
+        stats: RunStats,
+        event_log: JsonlEventLog,
+    ) -> list[RangeSummary]:
+        analyses_by_number = {analysis.chapter_number: analysis for analysis in analyses}
+        summaries: list[RangeSummary] = []
+        for chapter_group in _chunk_chapters(chapters, config.writing.range_summary_chapter_span):
+            start = chapter_group[0].number
+            end = chapter_group[-1].number
+            node_id = f"summarize_range:{start}-{end}"
+            artifact_id = f"range_summary:{start}-{end}"
+            cached_artifact = store.get_latest_artifact(artifact_id, approved_only=True)
+            if cached_artifact is not None:
+                summaries.append(RangeSummary.model_validate(cached_artifact["payload"]))
+                store.upsert_node(
+                    node_id=node_id,
+                    node_type="summarize_range",
+                    status="completed",
+                    depends_on=[f"analyze_chapter:{chapter.number}" for chapter in chapter_group],
+                    output_version=f"{artifact_id}@{cached_artifact['version']}",
+                )
+                continue
+            store.upsert_node(
+                node_id=node_id,
+                node_type="summarize_range",
+                status="running",
+                depends_on=[f"analyze_chapter:{chapter.number}" for chapter in chapter_group],
+                input_version=_hash_json([chapter.number for chapter in chapter_group]),
+            )
+            summary = await self._call_model(
+                config=config,
+                runtime_id=runtime_id,
+                store=store,
+                stats=stats,
+                event_log=event_log,
+                task_type="range_summary",
+                tool_spec=_TOOL_SPECS["record_range_summary"],
+                input_payload={
+                    "chapters": [_chapter_payload(chapter) for chapter in chapter_group],
+                    "analyses": [
+                        analyses_by_number[chapter.number].model_dump(mode="json")
+                        for chapter in chapter_group
+                        if chapter.number in analyses_by_number
+                    ],
+                    "range": {"start_chapter": start, "end_chapter": end},
+                },
+            )
+            summary = RangeSummary(
+                **{
+                    **summary.model_dump(mode="python"),
+                    "start_chapter": start,
+                    "end_chapter": end,
+                }
+            )
+            version = store.upsert_artifact(
+                artifact_id=artifact_id,
+                artifact_type="range_summary",
+                payload=summary.model_dump(mode="json"),
+                is_approved=True,
+                source_node_id=node_id,
+            )
+            store.record_node_artifact(
+                node_id=node_id,
+                artifact_id=artifact_id,
+                artifact_version=version,
+                direction="output",
+            )
+            store.upsert_node(
+                node_id=node_id,
+                node_type="summarize_range",
+                status="completed",
+                depends_on=[f"analyze_chapter:{chapter.number}" for chapter in chapter_group],
+                output_version=f"{artifact_id}@{version}",
+            )
+            summaries.append(summary)
+        return summaries
+
+    async def _summarize_generated_window(
+        self,
+        *,
+        draft: DraftChapter,
+        analysis: ChapterAnalysis,
+        config: AppConfig,
+        runtime_id: str,
+        store: StateStore,
+        stats: RunStats,
+        event_log: JsonlEventLog,
+    ) -> None:
+        span = config.writing.range_summary_chapter_span
+        start = ((draft.chapter_number - 1) // span) * span + 1
+        end = start + span - 1
+        node_id = f"summarize_range:{start}-{end}"
+        artifact_id = f"range_summary:{start}-{end}"
+        store.upsert_node(
+            node_id=node_id,
+            node_type="summarize_range",
+            status="running",
+            depends_on=[f"integrate_generated_chapter:{draft.chapter_number}"],
+            input_version=_hash_json(
+                {
+                    "chapter_number": draft.chapter_number,
+                    "generation": store.get_chapter_generation(draft.chapter_number),
+                    "body_hash": _hash_json(draft.body),
+                }
+            ),
+        )
+        summary = await self._call_model(
+            config=config,
+            runtime_id=runtime_id,
+            store=store,
+            stats=stats,
+            event_log=event_log,
+            task_type="range_summary",
+            tool_spec=_TOOL_SPECS["record_range_summary"],
+            input_payload={
+                "chapters": [
+                    {
+                        "number": draft.chapter_number,
+                        "title": draft.title,
+                        "body": draft.body,
+                        "source": "generated",
+                    }
+                ],
+                "analyses": [analysis.model_dump(mode="json")],
+                "range": {"start_chapter": start, "end_chapter": end},
+            },
+            generation=store.get_chapter_generation(draft.chapter_number),
+        )
+        summary = RangeSummary(
+            **{
+                **summary.model_dump(mode="python"),
+                "start_chapter": start,
+                "end_chapter": max(summary.end_chapter, draft.chapter_number),
+            }
+        )
+        version = store.upsert_artifact(
+            artifact_id=artifact_id,
+            artifact_type="range_summary",
+            payload=summary.model_dump(mode="json"),
+            is_approved=True,
+            source_node_id=node_id,
+        )
+        store.record_node_artifact(
+            node_id=node_id,
+            artifact_id=artifact_id,
+            artifact_version=version,
+            direction="output",
+        )
+        store.upsert_node(
+            node_id=node_id,
+            node_type="summarize_range",
+            status="completed",
+            depends_on=[f"integrate_generated_chapter:{draft.chapter_number}"],
+            output_version=f"{artifact_id}@{version}",
+        )
 
     async def _draft_chapter(
         self,
@@ -811,6 +1341,25 @@ class InklinkPipeline:
         scene_drafts: list[SceneDraft] = []
         prior_scene_text = ""
         for scene in scene_plan.scenes:
+            node_id = f"draft_scene:{contract.chapter_number}:{scene.scene_id}"
+            depends_on = (
+                [f"draft_scene:{contract.chapter_number}:{scene_drafts[-1].scene_id}"]
+                if scene_drafts
+                else [f"approve_scene_plan:{contract.chapter_number}"]
+            )
+            store.upsert_node(
+                node_id=node_id,
+                node_type="draft_scene",
+                status="running",
+                depends_on=depends_on,
+                input_version=_hash_json(
+                    {
+                        "chapter_contract": contract.model_dump(mode="json"),
+                        "scene_contract": scene.model_dump(mode="json"),
+                        "prior_scene_hash": _hash_json(prior_scene_text),
+                    }
+                ),
+            )
             scene_draft = await self._call_model(
                 config=config,
                 runtime_id=runtime_id,
@@ -828,6 +1377,7 @@ class InklinkPipeline:
                         analyses=[],
                         story_state=story_state,
                         story_index=store.load_story_index(),
+                        chapters=[],
                         budget=config.writing.retrieval_token_budget,
                     ),
                     "previous_generated_body": previous_generated_body,
@@ -840,9 +1390,26 @@ class InklinkPipeline:
                 artifact_type="scene_draft",
                 payload=scene_draft.model_dump(mode="json"),
                 is_approved=True,
-                source_node_id=f"chapter-{contract.chapter_number}",
+                source_node_id=node_id,
+            )
+            store.upsert_node(
+                node_id=node_id,
+                node_type="draft_scene",
+                status="completed",
+                depends_on=depends_on,
+                output_version=f"scene_draft:{contract.chapter_number}:{scene.scene_id}",
             )
             prior_scene_text = scene_draft.text
+        assemble_node_id = f"assemble_chapter:{contract.chapter_number}"
+        store.upsert_node(
+            node_id=assemble_node_id,
+            node_type="assemble_chapter",
+            status="running",
+            depends_on=[
+                f"draft_scene:{contract.chapter_number}:{scene.scene_id}"
+                for scene in scene_plan.scenes
+            ],
+        )
         draft = DraftChapter(
             chapter_number=contract.chapter_number,
             title=contract.title,
@@ -853,7 +1420,17 @@ class InklinkPipeline:
             artifact_type="chapter_draft",
             payload=draft.model_dump(mode="json"),
             is_approved=True,
-            source_node_id=f"chapter-{contract.chapter_number}",
+            source_node_id=assemble_node_id,
+        )
+        store.upsert_node(
+            node_id=assemble_node_id,
+            node_type="assemble_chapter",
+            status="completed",
+            depends_on=[
+                f"draft_scene:{contract.chapter_number}:{scene.scene_id}"
+                for scene in scene_plan.scenes
+            ],
+            output_version=f"chapter_draft:{contract.chapter_number}",
         )
         return _DraftPackage(draft=draft, scenes=scene_drafts)
 
@@ -875,15 +1452,34 @@ class InklinkPipeline:
     ) -> DraftChapter:
         current = draft
         for attempt in range(max_revision_rounds + 1):
+            store.upsert_node(
+                node_id=f"check_chapter:{contract.chapter_number}",
+                node_type="check_chapter",
+                status="running",
+                depends_on=[f"assemble_chapter:{contract.chapter_number}"],
+                attempt=attempt,
+                input_version=_hash_json(current.model_dump(mode="json")),
+            )
             check_report = run_chapter_checks(
                 contract=contract,
                 draft=current,
-                plot_threads=[],
+                plot_threads=_plot_threads_from_index(store.load_story_index()),
                 scene_contracts=scene_plan.scenes,
                 scene_drafts=scene_drafts,
                 tolerance_ratio=config.writing.word_count_tolerance_ratio,
             )
             if not check_report.passed:
+                store.upsert_node(
+                    node_id=f"check_chapter:{contract.chapter_number}",
+                    node_type="check_chapter",
+                    status="failed",
+                    depends_on=[f"assemble_chapter:{contract.chapter_number}"],
+                    attempt=attempt,
+                    error_summary=json.dumps(
+                        [issue.model_dump(mode="json") for issue in check_report.issues],
+                        ensure_ascii=False,
+                    ),
+                )
                 deterministic_issues = [
                     issue.model_dump(mode="json") for issue in check_report.issues
                 ]
@@ -920,7 +1516,22 @@ class InklinkPipeline:
                 )
                 scene_drafts = []
                 continue
+            store.upsert_node(
+                node_id=f"check_chapter:{contract.chapter_number}",
+                node_type="check_chapter",
+                status="completed",
+                depends_on=[f"assemble_chapter:{contract.chapter_number}"],
+                attempt=attempt,
+            )
 
+            store.upsert_node(
+                node_id=f"review_chapter:{contract.chapter_number}",
+                node_type="review_chapter",
+                status="running",
+                depends_on=[f"check_chapter:{contract.chapter_number}"],
+                attempt=attempt,
+                input_version=_hash_json(current.model_dump(mode="json")),
+            )
             review = await self._call_model(
                 config=config,
                 runtime_id=runtime_id,
@@ -935,8 +1546,41 @@ class InklinkPipeline:
                     "draft": current.model_dump(mode="json"),
                 },
             )
+            post_review_report = run_chapter_checks(
+                contract=contract,
+                draft=current,
+                plot_threads=_plot_threads_from_index(store.load_story_index()),
+                scene_contracts=scene_plan.scenes if scene_drafts else None,
+                scene_drafts=scene_drafts if scene_drafts else None,
+                tolerance_ratio=config.writing.word_count_tolerance_ratio,
+                resolved_thread_ids=review.resolved_thread_ids,
+            )
+            if not post_review_report.passed:
+                review = ChapterReview(
+                    passed=False,
+                    issues=[
+                        *review.issues,
+                        *[issue.message for issue in post_review_report.issues],
+                    ],
+                    resolved_thread_ids=review.resolved_thread_ids,
+                )
             if review.passed:
+                store.upsert_node(
+                    node_id=f"review_chapter:{contract.chapter_number}",
+                    node_type="review_chapter",
+                    status="completed",
+                    depends_on=[f"check_chapter:{contract.chapter_number}"],
+                    attempt=attempt,
+                )
                 return current
+            store.upsert_node(
+                node_id=f"review_chapter:{contract.chapter_number}",
+                node_type="review_chapter",
+                status="failed",
+                depends_on=[f"check_chapter:{contract.chapter_number}"],
+                attempt=attempt,
+                error_summary=json.dumps(review.issues, ensure_ascii=False),
+            )
             if attempt >= max_revision_rounds:
                 approval_id = f"review_failure:{contract.chapter_number}"
                 if _approval_is_accepted(store, approval_id):
@@ -985,6 +1629,24 @@ class InklinkPipeline:
         generation: int,
         attempt: int,
     ) -> DraftChapter:
+        node_id = f"revise_chapter:{contract.chapter_number}"
+        store.upsert_node(
+            node_id=node_id,
+            node_type="revise_chapter",
+            status="running",
+            depends_on=[
+                f"review_chapter:{contract.chapter_number}",
+                f"check_chapter:{contract.chapter_number}",
+            ],
+            attempt=attempt,
+            input_version=_hash_json(
+                {
+                    "draft": draft.model_dump(mode="json"),
+                    "reason": reason,
+                    "generation": generation,
+                }
+            ),
+        )
         revision = await self._call_model(
             config=config,
             runtime_id=runtime_id,
@@ -1011,7 +1673,18 @@ class InklinkPipeline:
             artifact_type="chapter_draft",
             payload=revised.model_dump(mode="json"),
             is_approved=True,
-            source_node_id=f"chapter-{contract.chapter_number}",
+            source_node_id=node_id,
+        )
+        store.upsert_node(
+            node_id=node_id,
+            node_type="revise_chapter",
+            status="completed",
+            depends_on=[
+                f"review_chapter:{contract.chapter_number}",
+                f"check_chapter:{contract.chapter_number}",
+            ],
+            attempt=attempt,
+            output_version=f"chapter_draft:{contract.chapter_number}",
         )
         return revised
 
@@ -1147,12 +1820,62 @@ def _bucket(target: dict[str, UsageBucket], key: str) -> UsageBucket:
     return target[key]
 
 
+def _add_optional_tokens(current: int | None, value: int | None) -> int | None:
+    if value is None:
+        return current
+    return (current or 0) + value
+
+
+def _sum_usage_buckets(buckets: Iterable[UsageBucket]) -> UsageBucket:
+    total = UsageBucket()
+    for bucket in buckets:
+        total.calls += bucket.calls
+        total.input_tokens += bucket.input_tokens
+        total.output_tokens += bucket.output_tokens
+        total.total_tokens += bucket.total_tokens
+        total.reasoning_tokens = _add_optional_tokens(
+            total.reasoning_tokens,
+            bucket.reasoning_tokens,
+        )
+        total.cached_tokens = _add_optional_tokens(total.cached_tokens, bucket.cached_tokens)
+        total.cache_read_tokens = _add_optional_tokens(
+            total.cache_read_tokens,
+            bucket.cache_read_tokens,
+        )
+        total.cache_write_tokens = _add_optional_tokens(
+            total.cache_write_tokens,
+            bucket.cache_write_tokens,
+        )
+    return total
+
+
+def _drop_legacy_optional_zero_usage(bucket: object) -> object:
+    if not isinstance(bucket, dict):
+        return bucket
+    normalized = dict(bucket)
+    for key in (
+        "reasoning_tokens",
+        "cached_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    ):
+        if normalized.get(key) == 0:
+            normalized.pop(key)
+    return normalized
+
+
 def _chapter_payload(chapter: Chapter) -> dict[str, object]:
     return {
         "number": chapter.number,
         "title": chapter.title,
         "body": chapter.body,
     }
+
+
+def _chunk_chapters(chapters: list[Chapter], span: int) -> list[list[Chapter]]:
+    if span <= 0:
+        raise ValueError("span must be positive")
+    return [chapters[index : index + span] for index in range(0, len(chapters), span)]
 
 
 def trim_retrieval_items(
@@ -1189,6 +1912,7 @@ def _retrieval_context(
     analyses: list[ChapterAnalysis],
     story_state: StoryState,
     story_index: StoryIndex | None = None,
+    chapters: list[Chapter],
     budget: int | None,
 ) -> list[dict[str, object]]:
     items: list[dict[str, object]] = [
@@ -1209,8 +1933,59 @@ def _retrieval_context(
             }
         )
     if story_index is not None:
-        items.extend(story_index.retrieval_items(max_items=20))
+        items.extend(story_index.retrieval_items(max_items=30))
+        items.extend(_source_excerpt_items(story_index=story_index, chapters=chapters))
     return trim_retrieval_items(items, budget)
+
+
+def _source_excerpt_items(
+    *,
+    story_index: StoryIndex,
+    chapters: list[Chapter],
+) -> list[dict[str, object]]:
+    chapters_by_number = {chapter.number: chapter for chapter in chapters}
+    source_chapters: dict[int, int] = {}
+    for thread in story_index.plot_threads.values():
+        priority = 2 if thread.status.value not in {"resolved", "abandoned"} else 6
+        source_chapters[thread.source_chapter] = min(
+            priority,
+            source_chapters.get(thread.source_chapter, priority),
+        )
+        for chapter_number in thread.reinforced_chapters[-2:]:
+            source_chapters[chapter_number] = min(3, source_chapters.get(chapter_number, 3))
+    for event in story_index.events.values():
+        source_chapters[event.chapter_number] = min(
+            event.importance,
+            source_chapters.get(event.chapter_number, event.importance),
+        )
+    for rule in story_index.world_rules.values():
+        source_chapters[rule.source_chapter] = min(
+            rule.importance,
+            source_chapters.get(rule.source_chapter, rule.importance),
+        )
+    items: list[dict[str, object]] = []
+    for chapter_number, priority in sorted(
+        source_chapters.items(), key=lambda item: (item[1], item[0])
+    ):
+        chapter = chapters_by_number.get(chapter_number)
+        if chapter is None:
+            continue
+        items.append(
+            {
+                "priority": priority,
+                "kind": "source_excerpt",
+                "chapter_number": chapter_number,
+                "text": f"{chapter_number}《{chapter.title}》原文片段: {_excerpt(chapter.body)}",
+            }
+        )
+    return items
+
+
+def _excerpt(text: str, limit: int = 360) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip()
 
 
 def _instructions_for(tool_name: str) -> str:
@@ -1442,6 +2217,59 @@ def _index_from_analyses(analyses: list[ChapterAnalysis]) -> StoryIndex:
     return index
 
 
+def _analysis_needs_deep_upgrade(analysis: ChapterAnalysis) -> bool:
+    if not analysis.plot_threads and not analysis.suspense:
+        return False
+    facts = _facts_from_analysis(analysis, generation=1)
+    for fact in facts:
+        if fact.kind != "plot_thread":
+            continue
+        payload = fact.payload
+        has_source = isinstance(payload.get("source_chapter"), int)
+        has_thread_id = isinstance(payload.get("thread_id"), str)
+        has_status = isinstance(payload.get("status"), str)
+        has_resolution_window = isinstance(payload.get("due_chapter"), int) or isinstance(
+            payload.get("resolution_end_chapter"),
+            int,
+        )
+        if not (has_source and has_thread_id and has_status and has_resolution_window):
+            return True
+    return False
+
+
+def _analysis_node_is_deep(store: StateStore, chapter_number: int) -> bool:
+    try:
+        node = store.get_node(f"analyze_chapter:{chapter_number}")
+    except KeyError:
+        return False
+    output_version = node.get("output_version")
+    return isinstance(output_version, str) and "|depth:deep" in output_version
+
+
+def _plot_threads_from_index(index: StoryIndex) -> list[PlotThread]:
+    threads: list[PlotThread] = []
+    for entry in index.plot_threads.values():
+        due_chapter = (
+            entry.resolution_window.end_chapter if entry.resolution_window is not None else None
+        )
+        abandoned_chapter = entry.resolved_chapter if entry.status.value == "abandoned" else None
+        threads.append(
+            PlotThread(
+                thread_id=entry.thread_id,
+                description=entry.description,
+                status=entry.status,
+                source_chapter=entry.source_chapter,
+                due_chapter=due_chapter,
+                resolved_chapter=entry.resolved_chapter
+                if entry.status.value == "resolved"
+                else None,
+                abandoned_chapter=abandoned_chapter,
+                related_keywords=entry.keywords,
+            )
+        )
+    return threads
+
+
 def _mentions_from_analysis(
     analysis: ChapterAnalysis,
     *,
@@ -1465,41 +2293,13 @@ def _facts_from_analysis(
     *,
     generation: int,
 ) -> list[StructuredFact]:
-    facts: list[StructuredFact] = []
-    for offset, fact in enumerate(analysis.worldbuilding):
-        facts.append(
-            StructuredFact(
-                fact_id=f"worldbuilding:{analysis.chapter_number}:{offset}",
-                kind="worldbuilding",
-                text=fact,
-                chapter_number=analysis.chapter_number,
-                generation=generation,
-                priority=4,
-            )
-        )
-    for offset, thread in enumerate(analysis.plot_threads):
-        facts.append(
-            StructuredFact(
-                fact_id=f"plot_thread:{analysis.chapter_number}:{offset}",
-                kind="plot_thread",
-                text=thread,
-                chapter_number=analysis.chapter_number,
-                generation=generation,
-                priority=2,
-            )
-        )
-    for offset, suspense in enumerate(analysis.suspense):
-        facts.append(
-            StructuredFact(
-                fact_id=f"event:{analysis.chapter_number}:{offset}",
-                kind="event",
-                text=suspense,
-                chapter_number=analysis.chapter_number,
-                generation=generation,
-                priority=3,
-            )
-        )
-    return facts
+    return facts_from_chapter_analysis(
+        chapter_number=analysis.chapter_number,
+        generation=generation,
+        worldbuilding=analysis.worldbuilding,
+        plot_threads=analysis.plot_threads,
+        suspense=analysis.suspense,
+    )
 
 
 def _call_idempotency_key(
@@ -1536,24 +2336,77 @@ def _hash_json(payload: object) -> str:
 
 def _write_chapter_output(
     *,
+    store: StateStore,
+    event_log: JsonlEventLog,
     run_log_dir: Path,
     input_dir: Path,
     output_mode: str,
     draft: DraftChapter,
+    depends_on: list[str],
 ) -> Path:
+    node_id = f"write_output:{draft.chapter_number}"
     content = f"title: {draft.title}\n---\n{draft.body}"
+    store.upsert_node(
+        node_id=node_id,
+        node_type="write_output",
+        status="running",
+        depends_on=depends_on,
+        input_version=_hash_json(draft.model_dump(mode="json")),
+    )
     if output_mode == "output":
         target = run_log_dir / "outputs" / "chapters" / f"{draft.chapter_number}.txt"
         atomic_write_text(target, content)
+        store.upsert_node(
+            node_id=node_id,
+            node_type="write_output",
+            status="completed",
+            depends_on=depends_on,
+            output_version=str(target),
+        )
         return target
     if output_mode == "writeback":
         target = input_dir / f"{draft.chapter_number}.txt"
+        pending_target = (
+            run_log_dir / "outputs" / "pending_writeback" / f"{draft.chapter_number}.txt"
+        )
         if target.exists():
-            raise FileExistsError(f"writeback target already exists: {target}")
-        tmp_target = run_log_dir / "outputs" / f"tmp_{draft.chapter_number}.txt"
-        atomic_write_text(tmp_target, content)
+            atomic_write_text(pending_target, content)
+            store.upsert_node(
+                node_id=node_id,
+                node_type="write_output",
+                status="waiting",
+                depends_on=depends_on,
+                waiting_reason=f"writeback target already exists: {target}",
+                output_version=str(pending_target),
+            )
+            event_log.write(
+                "write_output_waiting",
+                {
+                    "chapter_number": draft.chapter_number,
+                    "target": str(target),
+                    "pending_file": str(pending_target),
+                },
+            )
+            raise WriteOutputApprovalRequired(
+                chapter_number=draft.chapter_number,
+                target=target,
+                pending_file=pending_target,
+            )
+        source = pending_target if pending_target.exists() else None
         target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(tmp_target, target)
+        if source is None:
+            tmp_target = run_log_dir / "outputs" / f"tmp_{draft.chapter_number}.txt"
+            atomic_write_text(tmp_target, content)
+            source = tmp_target
+        os.replace(source, target)
+        store.upsert_node(
+            node_id=node_id,
+            node_type="write_output",
+            status="completed",
+            depends_on=depends_on,
+            output_version=str(target),
+            waiting_reason=None,
+        )
         return target
     raise ValueError(f"unknown output_mode: {output_mode}")
 
@@ -1564,6 +2417,67 @@ def _resume_completed_summary(store: StateStore) -> PipelineSummary | None:
         return None
     summary = PipelineSummary.model_validate(artifact["payload"])
     return summary if summary.status == "completed" else None
+
+
+def _resume_pending_write_output_summary(
+    *,
+    store: StateStore,
+    runtime_id: str,
+    log_dir: Path,
+    input_dir: Path,
+    event_log: JsonlEventLog,
+) -> PipelineSummary | None:
+    artifact = store.get_latest_artifact("run_summary", approved_only=True)
+    if artifact is None:
+        return None
+    summary = PipelineSummary.model_validate(artifact["payload"])
+    if summary.status != "waiting_write_output" or summary.waiting_node_id is None:
+        return None
+    prefix = "write_output:"
+    if not summary.waiting_node_id.startswith(prefix):
+        return None
+    try:
+        chapter_number = int(summary.waiting_node_id.removeprefix(prefix))
+    except ValueError:
+        return None
+    pending_file = log_dir / "outputs" / "pending_writeback" / f"{chapter_number}.txt"
+    target = input_dir / f"{chapter_number}.txt"
+    if not pending_file.is_file() or target.exists():
+        return summary
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(pending_file, target)
+    store.upsert_node(
+        node_id=summary.waiting_node_id,
+        node_type="write_output",
+        status="completed",
+        output_version=str(target),
+        waiting_reason=None,
+    )
+    completed = PipelineSummary(
+        runtime_id=summary.runtime_id,
+        log_dir=summary.log_dir,
+        generated_chapters=[chapter_number],
+        output_files=[target],
+        stats=summary.stats,
+        status="completed",
+    )
+    _write_json(log_dir / "artifacts" / "run_summary.json", completed.model_dump(mode="json"))
+    store.upsert_artifact(
+        artifact_id="run_summary",
+        artifact_type="run_summary",
+        payload=completed.model_dump(mode="json"),
+        is_approved=True,
+    )
+    store.update_run_status(runtime_id, "completed")
+    event_log.write(
+        "write_output_resumed",
+        {
+            "runtime_id": runtime_id,
+            "chapter_number": chapter_number,
+            "target": str(target),
+        },
+    )
+    return completed
 
 
 def _completed_chapter_output(
@@ -1627,6 +2541,56 @@ def _pause_for_approval(
         {
             "runtime_id": runtime_id,
             "approval_id": approval_id,
+        },
+    )
+    return summary
+
+
+def _pause_for_write_output(
+    *,
+    runtime_id: str,
+    log_dir: Path,
+    store: StateStore,
+    event_log: JsonlEventLog,
+    stats: RunStats,
+    chapter_number: int,
+    target: Path,
+    pending_file: Path,
+) -> PipelineSummary:
+    approval_id = f"write_output:{chapter_number}"
+    store.create_or_update_approval(
+        approval_id=approval_id,
+        approval_type="write_output",
+        status="waiting",
+        auto_approve=False,
+    )
+    summary = PipelineSummary(
+        runtime_id=runtime_id,
+        log_dir=log_dir,
+        generated_chapters=[],
+        output_files=[],
+        stats=stats,
+        status="waiting_write_output",
+        waiting_approval_id=approval_id,
+        waiting_node_id=approval_id,
+    )
+    artifacts_dir = log_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(artifacts_dir / "run_summary.json", summary.model_dump(mode="json"))
+    store.upsert_artifact(
+        artifact_id="run_summary",
+        artifact_type="run_summary",
+        payload=summary.model_dump(mode="json"),
+        is_approved=True,
+    )
+    store.update_run_status(runtime_id, "waiting_write_output")
+    event_log.write(
+        "run_waiting_write_output",
+        {
+            "runtime_id": runtime_id,
+            "chapter_number": chapter_number,
+            "target": str(target),
+            "pending_file": str(pending_file),
         },
     )
     return summary
