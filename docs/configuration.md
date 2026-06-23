@@ -26,6 +26,12 @@ Inklink 从 `config.toml` 读取配置，示例见仓库根目录的 `config.tom
 | `runtime.output_mode` | `"output"` 或 `"writeback"` | `"output"` | `output` 表示输出到 `logs/<runtime_id>/outputs/chapters/`，不修改原章节目录；`writeback` 写回输入目录的目标章节号，若目标文件已存在会写入 `pending_writeback` 并等待用户处理后 resume。 |
 | `runtime.save_full_prompts` | bool | `true` | 是否保存完整 prompt。开启后便于断点续接和排查，但日志可能包含小说正文、设定和审批聊天内容。 |
 
+## 运行参数与 notes
+
+TUI 首页和 CLI `inklink run --execute` 支持在每次续写任务开始时设置输入目录、输出模式、章节范围、字数范围、修订轮数、自动批准和额外 notes。notes 是本次续写的补充约束，会和 notes 文件内容合并后写入模型输入；世界观、设定、人物关系、伏笔和文风仍会主要从已有章节推断。
+
+首次运行会把解析后的运行参数保存到 `logs/<runtime_id>/artifacts/run_settings.json`，并同步写入 SQLite `runs.settings_json`。恢复同一 runtime 时，pipeline 优先复用这份持久化设置，因此不需要重新输入 notes 或字数范围；CLI 也可以只传 `--resume-runtime-id`。本次恢复命令里的 `--auto-approve` 可以作为继续通过后续审批点的临时开关，不会改写已保存的创作参数。
+
 ## writing
 
 当前 pipeline 已使用字数区间、自动修订轮数、分段区间摘要和轻量检索预算裁剪。检索预算当前以字符数近似 token 预算，用确定性优先级裁剪故事状态、结构化索引和原文片段；后续可替换为真实 tokenizer。

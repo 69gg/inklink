@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from pytest import MonkeyPatch
@@ -136,8 +137,8 @@ api_key_env = "MISSING_FAKE_KEY"
             "--max-revision-rounds",
             "4",
             "--auto-approve",
-            "--resume-runtime-id",
-            "runtime",
+            "--notes",
+            "保留悬念",
         ],
     )
 
@@ -148,8 +149,9 @@ api_key_env = "MISSING_FAKE_KEY"
     assert options.input_dir == novel
     assert options.chapter_count == 1
     assert options.auto_approve is True
-    assert options.runtime_id == "runtime"
+    assert options.runtime_id is None
     assert options.max_revision_rounds == 4
+    assert options.notes == "保留悬念"
     assert "usage_total" in result.output
     assert "usage_by_profile" in result.output
     assert "usage_by_model" in result.output
@@ -159,6 +161,72 @@ api_key_env = "MISSING_FAKE_KEY"
     assert "cache_read" not in result.output
     assert "cache_write" not in result.output
     assert "reasoning" not in result.output
+
+
+def test_cli_resume_uses_persisted_config_path(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, llm: object) -> None:
+            captured["llm"] = llm
+
+        async def run(self, options: object) -> PipelineSummary:
+            captured["options"] = options
+            return PipelineSummary(
+                runtime_id="runtime",
+                log_dir=tmp_path / "logs" / "runtime",
+                generated_chapters=[],
+                output_files=[],
+                stats=RunStats(),
+            )
+
+    class FakeLLM:
+        def __init__(self, config: object, api_keys: object) -> None:
+            captured["config"] = config
+            captured["api_keys"] = api_keys
+
+    config_path = tmp_path / "saved-config.toml"
+    config_path.write_text(
+        """
+[models.default]
+api = "responses"
+model = "fake-model"
+api_key_env = "MISSING_FAKE_KEY"
+""",
+        encoding="utf-8",
+    )
+    settings_dir = tmp_path / "logs" / "runtime" / "artifacts"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "run_settings.json").write_text(
+        json.dumps({"config_path": str(config_path)}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("inklink.cli.InklinkPipeline", FakePipeline)
+    monkeypatch.setattr("inklink.cli.OpenAIToolLLM", FakeLLM)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--execute",
+            "--resume-runtime-id",
+            "runtime",
+            "--log-root",
+            str(tmp_path / "logs"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    options = captured["options"]
+    assert isinstance(options, GenerationOptions)
+    assert options.input_dir is None
+    assert options.config_path == config_path
+    assert options.runtime_id == "runtime"
+    assert captured["config"].models["default"].model == "fake-model"
 
 
 def test_cli_run_execute_prints_optional_usage_fields(

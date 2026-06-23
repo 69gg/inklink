@@ -48,7 +48,7 @@ from inklink.llm.openai_client import (
 from inklink.llm.types import LLMToolCall, NormalizedUsage
 from inklink.storage.events import JsonlEventLog
 from inklink.storage.sqlite import StateStore
-from inklink.workflow.service import WorkflowService
+from inklink.workflow.service import WorkflowRun, WorkflowService
 
 
 class ToolLLM(Protocol):
@@ -154,7 +154,7 @@ class OpenAIToolLLM:
 class GenerationOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    input_dir: Path
+    input_dir: Path | None = None
     config_path: Path = Path("config.toml")
     log_root: Path = Path("logs")
     output_mode: str | None = None
@@ -165,6 +165,24 @@ class GenerationOptions(BaseModel):
     max_chars: int = Field(default=1800, ge=0)
     max_revision_rounds: int | None = Field(default=None, ge=0)
     auto_approve: bool = False
+    notes: str = ""
+    notes_path: Path | None = None
+
+
+class RunSettings(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    input_dir: Path
+    config_path: Path
+    output_mode: str
+    chapter_count: int = Field(gt=0)
+    start_chapter: int | None = Field(default=None, gt=0)
+    min_chars: int = Field(ge=0)
+    max_chars: int = Field(ge=0)
+    max_revision_rounds: int = Field(ge=0)
+    auto_approve: bool = False
+    notes: str = ""
+    notes_path: Path | None = None
 
 
 class UsageBucket(BaseModel):
@@ -369,13 +387,7 @@ class InklinkPipeline:
                 store.close()
 
     async def run(self, options: GenerationOptions) -> PipelineSummary:
-        config = load_config(options.config_path)
-        output_mode = options.output_mode or config.runtime.output_mode
-        max_revision_rounds = (
-            options.max_revision_rounds
-            if options.max_revision_rounds is not None
-            else config.writing.max_revision_rounds
-        )
+        initial_config = load_config(options.config_path) if options.runtime_id is None else None
         stats = RunStats()
         output_files: list[Path] = []
         generated_chapters: list[int] = []
@@ -384,11 +396,21 @@ class InklinkPipeline:
             run = (
                 service.resume_run(options.runtime_id)
                 if options.runtime_id is not None
-                else service.start_run(options.input_dir)
+                else service.start_run(_required_input_dir(options))
             )
             event_log = JsonlEventLog(run.log_dir / "events.jsonl")
             store = StateStore.open(run.log_dir / "state.sqlite")
             try:
+                settings = _settings_for_run(
+                    options=options,
+                    config=initial_config,
+                    run=run,
+                    store=store,
+                )
+                config = load_config(settings.config_path)
+                output_mode = settings.output_mode
+                max_revision_rounds = settings.max_revision_rounds
+                effective_auto_approve = settings.auto_approve or options.auto_approve
                 if options.runtime_id is not None:
                     pending_summary = _resume_pending_write_output_summary(
                         store=store,
@@ -425,6 +447,7 @@ class InklinkPipeline:
                             }
                             for chapter in chapters
                         ]
+                        + [{"run_settings": settings.model_dump(mode="json")}]
                     ),
                     output_version=f"chapters:{len(chapters)}",
                 )
@@ -501,6 +524,7 @@ class InklinkPipeline:
                         "story_index_projection": store.load_story_index().retrieval_items(
                             max_items=50
                         ),
+                        "user_notes": settings.notes,
                     },
                 )
                 _write_json(artifacts_dir / "story_state.json", story_state.model_dump(mode="json"))
@@ -538,7 +562,8 @@ class InklinkPipeline:
                         input_version=_hash_json(
                             {
                                 "story_state": story_state.model_dump(mode="json"),
-                                "chapter_count": options.chapter_count,
+                                "chapter_count": settings.chapter_count,
+                                "user_notes": settings.notes,
                             }
                         ),
                     )
@@ -553,12 +578,13 @@ class InklinkPipeline:
                         input_payload={
                             "story_state": story_state.model_dump(mode="json"),
                             "retrieval_context": retrieval_context,
-                            "chapter_count": options.chapter_count,
+                            "chapter_count": settings.chapter_count,
+                            "user_notes": settings.notes,
                         },
                     )
                     _write_json(artifacts_dir / "outline.json", outline.model_dump(mode="json"))
                     outline_auto = _should_auto_approve(
-                        options.auto_approve,
+                        effective_auto_approve,
                         config.approvals.auto_approve_outline,
                     )
                     outline_version = store.upsert_artifact(
@@ -635,10 +661,11 @@ class InklinkPipeline:
                         input_version=_hash_json(
                             {
                                 "outline": outline.model_dump(mode="json"),
-                                "start_chapter": options.start_chapter or len(chapters) + 1,
-                                "chapter_count": options.chapter_count,
-                                "min_chars": options.min_chars,
-                                "max_chars": options.max_chars,
+                                "start_chapter": settings.start_chapter or len(chapters) + 1,
+                                "chapter_count": settings.chapter_count,
+                                "min_chars": settings.min_chars,
+                                "max_chars": settings.max_chars,
+                                "user_notes": settings.notes,
                             }
                         ),
                     )
@@ -653,25 +680,26 @@ class InklinkPipeline:
                         input_payload={
                             "outline": outline.model_dump(mode="json"),
                             "retrieval_context": retrieval_context,
-                            "start_chapter": options.start_chapter or len(chapters) + 1,
-                            "chapter_count": options.chapter_count,
-                            "min_chars": options.min_chars,
-                            "max_chars": options.max_chars,
+                            "start_chapter": settings.start_chapter or len(chapters) + 1,
+                            "chapter_count": settings.chapter_count,
+                            "min_chars": settings.min_chars,
+                            "max_chars": settings.max_chars,
+                            "user_notes": settings.notes,
                         },
                     )
                     chapter_contracts = _normalize_chapter_contracts(
                         plan=chapter_plan,
-                        start_chapter=options.start_chapter or len(chapters) + 1,
-                        chapter_count=options.chapter_count,
-                        min_chars=options.min_chars,
-                        max_chars=options.max_chars,
+                        start_chapter=settings.start_chapter or len(chapters) + 1,
+                        chapter_count=settings.chapter_count,
+                        min_chars=settings.min_chars,
+                        max_chars=settings.max_chars,
                     )
                     _write_json(
                         artifacts_dir / "chapter_plan.json",
                         [contract.model_dump(mode="json") for contract in chapter_contracts],
                     )
                     chapter_plan_auto = _should_auto_approve(
-                        options.auto_approve,
+                        effective_auto_approve,
                         config.approvals.auto_approve_chapter_plan,
                     )
                     chapter_plan_version = store.upsert_artifact(
@@ -796,10 +824,11 @@ class InklinkPipeline:
                                 "story_state": story_state.model_dump(mode="json"),
                                 "retrieval_context": retrieval_context,
                                 "previous_generated_body": previous_generated_body,
+                                "user_notes": settings.notes,
                             },
                         )
                         scene_plan_auto = _should_auto_approve(
-                            options.auto_approve,
+                            effective_auto_approve,
                             config.approvals.auto_approve_scene_plan,
                         )
                         scene_plan_version = store.upsert_artifact(
@@ -881,6 +910,7 @@ class InklinkPipeline:
                         scene_plan=scene_plan,
                         story_state=story_state,
                         previous_generated_body=previous_generated_body,
+                        user_notes=settings.notes,
                         generation=generation,
                     )
                     try:
@@ -896,8 +926,9 @@ class InklinkPipeline:
                             draft=draft_package.draft,
                             max_revision_rounds=max_revision_rounds,
                             generation=generation,
+                            user_notes=settings.notes,
                             auto_approve_review_failure=_should_auto_approve(
-                                options.auto_approve,
+                                effective_auto_approve,
                                 config.approvals.auto_approve_review_failure,
                             ),
                         )
@@ -1366,6 +1397,7 @@ class InklinkPipeline:
         scene_plan: ScenePlan,
         story_state: StoryState,
         previous_generated_body: str,
+        user_notes: str,
         generation: int,
     ) -> _DraftPackage:
         scene_drafts: list[SceneDraft] = []
@@ -1412,6 +1444,7 @@ class InklinkPipeline:
                     ),
                     "previous_generated_body": previous_generated_body,
                     "prior_scene_text": prior_scene_text,
+                    "user_notes": user_notes,
                 },
             )
             scene_drafts.append(scene_draft)
@@ -1478,6 +1511,7 @@ class InklinkPipeline:
         draft: DraftChapter,
         max_revision_rounds: int,
         generation: int,
+        user_notes: str,
         auto_approve_review_failure: bool,
     ) -> DraftChapter:
         current = draft
@@ -1543,6 +1577,7 @@ class InklinkPipeline:
                     reason={"deterministic_issues": deterministic_issues},
                     generation=generation,
                     attempt=attempt + 1,
+                    user_notes=user_notes,
                 )
                 scene_drafts = []
                 continue
@@ -1574,6 +1609,7 @@ class InklinkPipeline:
                 input_payload={
                     "chapter_contract": contract.model_dump(mode="json"),
                     "draft": current.model_dump(mode="json"),
+                    "user_notes": user_notes,
                 },
             )
             post_review_report = run_chapter_checks(
@@ -1641,6 +1677,7 @@ class InklinkPipeline:
                 reason={"review_issues": review.issues},
                 generation=generation,
                 attempt=attempt + 1,
+                user_notes=user_notes,
             )
             scene_drafts = []
         return current
@@ -1658,6 +1695,7 @@ class InklinkPipeline:
         reason: dict[str, object],
         generation: int,
         attempt: int,
+        user_notes: str,
     ) -> DraftChapter:
         node_id = f"revise_chapter:{contract.chapter_number}"
         store.upsert_node(
@@ -1674,6 +1712,7 @@ class InklinkPipeline:
                     "draft": draft.model_dump(mode="json"),
                     "reason": reason,
                     "generation": generation,
+                    "user_notes": user_notes,
                 }
             ),
         )
@@ -1691,6 +1730,7 @@ class InklinkPipeline:
                 "draft": draft.model_dump(mode="json"),
                 "reason": reason,
                 "revision_attempt": attempt,
+                "user_notes": user_notes,
             },
         )
         revised = DraftChapter(
@@ -1907,6 +1947,70 @@ def _normalized_usage_from_row(value: object) -> NormalizedUsage | None:
     if not isinstance(parsed, dict):
         return None
     return NormalizedUsage.model_validate(parsed)
+
+
+def _required_input_dir(options: GenerationOptions) -> Path:
+    if options.input_dir is None:
+        raise ValueError("input_dir is required when starting a new run")
+    return options.input_dir
+
+
+def _settings_for_run(
+    *,
+    options: GenerationOptions,
+    config: AppConfig | None,
+    run: WorkflowRun,
+    store: StateStore,
+) -> RunSettings:
+    if options.runtime_id is not None:
+        stored = store.get_run_settings(options.runtime_id)
+        if stored:
+            return RunSettings.model_validate(stored)
+        if config is None:
+            config = load_config(options.config_path)
+
+    if config is None:
+        raise ValueError("config is required when creating run settings")
+    settings = RunSettings(
+        input_dir=_required_input_dir(options).resolve(),
+        config_path=options.config_path,
+        output_mode=options.output_mode or config.runtime.output_mode,
+        chapter_count=options.chapter_count,
+        start_chapter=options.start_chapter,
+        min_chars=options.min_chars,
+        max_chars=options.max_chars,
+        max_revision_rounds=(
+            options.max_revision_rounds
+            if options.max_revision_rounds is not None
+            else config.writing.max_revision_rounds
+        ),
+        auto_approve=options.auto_approve,
+        notes=_combined_notes(options.notes, options.notes_path),
+        notes_path=options.notes_path,
+    )
+    settings_payload = settings.model_dump(mode="json")
+    store.update_run_settings(run.runtime_id, settings_payload)
+    artifacts_dir = run.log_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(artifacts_dir / "run_settings.json", settings_payload)
+    store.upsert_artifact(
+        artifact_id="run_settings",
+        artifact_type="run_settings",
+        payload=settings_payload,
+        is_approved=True,
+    )
+    return settings
+
+
+def _combined_notes(inline_notes: str, notes_path: Path | None) -> str:
+    parts: list[str] = []
+    if notes_path is not None:
+        note_file_text = notes_path.read_text(encoding="utf-8-sig")
+        if note_file_text.strip():
+            parts.append(note_file_text.strip())
+    if inline_notes.strip():
+        parts.append(inline_notes.strip())
+    return "\n\n".join(parts)
 
 
 def _drop_legacy_optional_zero_usage(bucket: object) -> object:

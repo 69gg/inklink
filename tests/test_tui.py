@@ -1,4 +1,4 @@
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Static, TextArea
 
 from inklink.tui.app import InklinkApp
 from inklink.tui.screens import (
@@ -6,6 +6,7 @@ from inklink.tui.screens import (
     RuntimeApprovalsScreen,
     RuntimeArtifactsScreen,
     RuntimeLogScreen,
+    SetupWorkspace,
     StatsScreen,
     _format_node_tree,
 )
@@ -45,9 +46,27 @@ async def test_tui_initial_interface_contains_generation_controls() -> None:
         assert screen.query_one("#tui-max-revision-rounds", Input)
         assert screen.query_one("#tui-output-mode", Input)
         assert screen.query_one("#tui-auto-approve", Input)
+        assert screen.query_one("#tui-notes", TextArea)
         assert screen.query_one("#tui-log-root", Input)
         assert screen.query_one("#run-pipeline", Button)
         assert screen.query_one("#resume-pipeline", Button)
+
+
+async def test_tui_setup_workspace_scrolls_to_bottom_controls_on_small_terminal() -> None:
+    app = InklinkApp()
+
+    async with app.run_test(size=(100, 18)) as pilot:
+        setup = pilot.app.screen.query_one(SetupWorkspace)
+        run_button = pilot.app.screen.query_one("#run-pipeline", Button)
+
+        assert setup.max_scroll_y > 0
+
+        setup.scroll_end(animate=False, immediate=True)
+        await pilot.pause()
+
+        assert setup.scroll_y == setup.max_scroll_y
+        assert run_button.region.y >= setup.region.y
+        assert run_button.region.y < setup.region.y + setup.region.height
 
 
 async def test_tui_f1_shows_dashboard_screen() -> None:

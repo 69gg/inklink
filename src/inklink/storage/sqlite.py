@@ -64,10 +64,17 @@ class StateStore:
     def close(self) -> None:
         self._connection.close()
 
-    def create_run(self, runtime_id: str, input_dir: str, status: str) -> None:
+    def create_run(
+        self,
+        runtime_id: str,
+        input_dir: str,
+        status: str,
+        *,
+        settings: dict[str, object] | None = None,
+    ) -> None:
         self._connection.execute(
-            "INSERT INTO runs(runtime_id, input_dir, status) VALUES (?, ?, ?)",
-            (runtime_id, input_dir, status),
+            "INSERT INTO runs(runtime_id, input_dir, status, settings_json) VALUES (?, ?, ?, ?)",
+            (runtime_id, input_dir, status, _dump_json(settings or {})),
         )
         self._connection.commit()
 
@@ -86,13 +93,42 @@ class StateStore:
         row = cast(
             sqlite3.Row | None,
             self._connection.execute(
-                "SELECT runtime_id, input_dir, status FROM runs WHERE runtime_id = ?",
+                """
+                SELECT runtime_id, input_dir, status, settings_json
+                FROM runs
+                WHERE runtime_id = ?
+                """,
                 (runtime_id,),
             ).fetchone(),
         )
         if row is None:
             raise KeyError(runtime_id)
-        return _row_to_dict(row)
+        item = _row_to_dict(row)
+        item["settings"] = _load_settings_json(item.pop("settings_json", "{}"))
+        return item
+
+    def update_run_settings(self, runtime_id: str, settings: dict[str, object]) -> None:
+        self._connection.execute(
+            """
+            UPDATE runs
+            SET settings_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE runtime_id = ?
+            """,
+            (_dump_json(settings), runtime_id),
+        )
+        self._connection.commit()
+
+    def get_run_settings(self, runtime_id: str) -> dict[str, object]:
+        row = cast(
+            sqlite3.Row | None,
+            self._connection.execute(
+                "SELECT settings_json FROM runs WHERE runtime_id = ?",
+                (runtime_id,),
+            ).fetchone(),
+        )
+        if row is None:
+            raise KeyError(runtime_id)
+        return _load_settings_json(row["settings_json"])
 
     def upsert_node(
         self,
@@ -1003,6 +1039,13 @@ def _dump_json(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def _load_settings_json(value: object) -> dict[str, object]:
+    parsed = json.loads(str(value or "{}"))
+    if not isinstance(parsed, dict):
+        raise ValueError("run settings_json must decode to an object")
+    return cast(dict[str, object], parsed)
+
+
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -1042,6 +1085,7 @@ def _migrate_schema(connection: sqlite3.Connection, version: int) -> None:
                 )
             if "waiting_reason" not in columns:
                 connection.execute("ALTER TABLE nodes ADD COLUMN waiting_reason TEXT")
+        _ensure_run_settings_column(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS node_artifacts (
@@ -1058,7 +1102,18 @@ def _migrate_schema(connection: sqlite3.Connection, version: int) -> None:
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
         return
+    if version == 4:
+        _ensure_run_settings_column(connection)
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        connection.commit()
+        return
     raise UnsupportedSchemaError(f"unsupported SQLite schema version {version}")
+
+
+def _ensure_run_settings_column(connection: sqlite3.Connection) -> None:
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(runs)").fetchall()}
+    if "settings_json" not in columns:
+        connection.execute("ALTER TABLE runs ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'")
 
 
 def _schema_version(connection: sqlite3.Connection) -> int:

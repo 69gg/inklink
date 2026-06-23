@@ -61,10 +61,18 @@ def run(
         bool,
         typer.Option(help="Automatically accept workflow approval gates for this run."),
     ] = False,
+    notes: Annotated[
+        str,
+        typer.Option(help="Extra user notes/constraints for this continuation run."),
+    ] = "",
+    notes_file: Annotated[
+        Path | None,
+        typer.Option(help="Path to a UTF-8 notes file for this continuation run."),
+    ] = None,
 ) -> None:
     """Launch the Inklink TUI."""
     if execute:
-        if input_dir is None:
+        if input_dir is None and resume_runtime_id is None:
             raise typer.BadParameter("input_dir is required when --execute is used")
         summary = asyncio.run(
             _run_pipeline(
@@ -79,6 +87,8 @@ def run(
                 max_chars=max_chars,
                 max_revision_rounds=max_revision_rounds,
                 auto_approve=auto_approve,
+                notes=notes,
+                notes_path=notes_file,
             )
         )
         typer.echo(f"runtime_id: {summary.runtime_id}")
@@ -95,7 +105,7 @@ def run(
 
 async def _run_pipeline(
     *,
-    input_dir: Path,
+    input_dir: Path | None,
     config: Path,
     log_root: Path,
     output_mode: str | None,
@@ -106,8 +116,11 @@ async def _run_pipeline(
     max_chars: int,
     max_revision_rounds: int | None,
     auto_approve: bool,
+    notes: str,
+    notes_path: Path | None,
 ) -> PipelineSummary:
-    app_config = load_config(config)
+    config_path = _config_path_for_pipeline(config=config, log_root=log_root, runtime_id=runtime_id)
+    app_config = load_config(config_path)
     api_keys = {
         name: os.environ.get(profile.api_key_env) for name, profile in app_config.models.items()
     }
@@ -115,7 +128,7 @@ async def _run_pipeline(
     return await InklinkPipeline(llm=llm).run(
         GenerationOptions(
             input_dir=input_dir,
-            config_path=config,
+            config_path=config_path,
             log_root=log_root,
             output_mode=output_mode,
             runtime_id=runtime_id,
@@ -125,8 +138,23 @@ async def _run_pipeline(
             max_chars=max_chars,
             max_revision_rounds=max_revision_rounds,
             auto_approve=auto_approve,
+            notes=notes,
+            notes_path=notes_path,
         )
     )
+
+
+def _config_path_for_pipeline(*, config: Path, log_root: Path, runtime_id: str | None) -> Path:
+    if runtime_id is None:
+        return config
+    settings_path = log_root / runtime_id / "artifacts" / "run_settings.json"
+    if not settings_path.is_file():
+        return config
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    if not isinstance(settings, dict):
+        return config
+    value = settings.get("config_path")
+    return Path(value) if isinstance(value, str) and value else config
 
 
 def _print_usage_summary(summary: PipelineSummary) -> None:

@@ -182,7 +182,10 @@ def test_state_store_records_run_and_nodes(tmp_path: Path) -> None:
             "runtime_id": "run-1",
             "input_dir": "/novel",
             "status": "running",
+            "settings": {},
         }
+        store.update_run_settings("run-1", {"notes": "保留悬念"})
+        assert store.get_run_settings("run-1") == {"notes": "保留悬念"}
         assert store.get_node("n1") == {
             "node_id": "n1",
             "node_type": "load_project",

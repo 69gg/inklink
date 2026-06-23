@@ -13,6 +13,7 @@
 - 支持多个模型 profile，并可把不同任务分配给不同模型。
 - 支持限流、重试、断点续接、运行日志、产物版本和 token 用量统计。
 - 输出可写入运行目录，也可在 `writeback` 模式下原子写回原章节目录。
+- 启动任务时可填写额外 notes；notes 会随运行设置持久化，恢复运行时自动复用。
 
 ## 安装
 
@@ -64,6 +65,7 @@ TUI 首页可以设置：
 - 最大修订轮数。
 - 输出模式：写入运行目录或写回原章节目录。
 - 自动批准选项。
+- 额外 notes：本次续写的补充约束。世界观、设定和人物关系仍会主要从正文推断。
 - 日志目录。
 
 运行中可查看 DAG 状态、节点、产物、审批消息、事件日志和用量统计，也可以提交审批意见、让 AI 修改当前产物、批准版本、重试失败节点、放弃章节或重写章节。
@@ -75,15 +77,17 @@ TUI 首页可以设置：
 ```bash
 uv run inklink run ./novel --config config.toml --execute \
   --chapter-count 1 --min-chars 800 --max-chars 1800 \
-  --max-revision-rounds 3 --auto-approve
+  --max-revision-rounds 3 --auto-approve \
+  --notes "保留门后悬念" --notes-file notes.md
 ```
 
 恢复已有运行：
 
 ```bash
-uv run inklink run ./novel --config config.toml --execute \
-  --resume-runtime-id <runtime_id>
+uv run inklink run --execute --resume-runtime-id <runtime_id> --auto-approve
 ```
+
+首次运行会把输入目录、配置文件、输出模式、字数范围、审批选项和 notes 保存到 `logs/<runtime_id>/artifacts/run_settings.json`。恢复同一 runtime 时，墨连会复用这些设置；本次命令里的 `--auto-approve` 可以作为继续通过后续审批点的临时开关。
 
 默认输出模式为 `output`，生成章节会写入：
 

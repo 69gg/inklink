@@ -459,6 +459,65 @@ async def test_pipeline_generates_chapter_outputs_and_stats(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_pipeline_persists_notes_and_reuses_settings_on_resume(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+    notes_file = tmp_path / "notes.md"
+    notes_file.write_text("文件 notes：青灯不能被直接解释。", encoding="utf-8")
+    log_root = tmp_path / "logs"
+    first_llm = FakeToolLLM()
+
+    paused = await InklinkPipeline(llm=first_llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=log_root,
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=False,
+            notes="界面 notes：保持克制。",
+            notes_path=notes_file,
+        )
+    )
+
+    settings = json.loads(
+        (paused.log_dir / "artifacts" / "run_settings.json").read_text(encoding="utf-8")
+    )
+    assert "文件 notes" in settings["notes"]
+    assert "界面 notes" in settings["notes"]
+    assert any("文件 notes" in input_text for _, _, input_text in first_llm.inputs)
+
+    from inklink.workflow.service import WorkflowService
+
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(paused.runtime_id)
+        service.approve_artifact(
+            approval_id="outline",
+            approval_type="outline",
+            artifact_id="outline",
+            artifact_version=1,
+        )
+
+    second_llm = FakeToolLLM()
+    resumed = await InklinkPipeline(llm=second_llm).run(
+        GenerationOptions(
+            log_root=log_root,
+            runtime_id=paused.runtime_id,
+            auto_approve=True,
+        )
+    )
+
+    assert resumed.status == "completed"
+    assert resumed.generated_chapters == [3]
+    assert any("界面 notes" in input_text for _, _, input_text in second_llm.inputs)
+
+
+@pytest.mark.asyncio
 async def test_pipeline_cold_start_upgrades_shallow_thread_sources(tmp_path: Path) -> None:
     novel = tmp_path / "novel"
     novel.mkdir()

@@ -25,8 +25,7 @@ uv run inklink run ./novel --config config.toml --execute \
 恢复已有 runtime：
 
 ```bash
-uv run inklink run ./novel --config config.toml --execute \
-  --resume-runtime-id <runtime_id>
+uv run inklink run --execute --resume-runtime-id <runtime_id>
 ```
 
 操作已有 runtime：

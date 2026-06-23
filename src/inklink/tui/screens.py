@@ -8,10 +8,9 @@ from typing import TYPE_CHECKING
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widget import Widget
-from textual.widgets import Button, Footer, Header, Input, Static
+from textual.widgets import Button, Footer, Header, Input, Static, TextArea
 
 from inklink.config import load_config
 from inklink.workflow.pipeline import GenerationOptions, InklinkPipeline, OpenAIToolLLM
@@ -23,12 +22,24 @@ DEFAULT_EVENT_LIMIT = 20
 OUTPUT_MODES = {"output", "writeback"}
 
 
-class SetupWorkspace(Widget):
+class ScreenBody(VerticalScroll):
+    """Scrollable body used between fixed screen headers and footers."""
+
+    DEFAULT_CSS = """
+    ScreenBody {
+        height: 1fr;
+        padding: 1 2;
+    }
+    """
+
+
+class SetupWorkspace(VerticalScroll):
     """Initial workspace setup and run launcher."""
 
     DEFAULT_CSS = """
     SetupWorkspace {
         padding: 1 2;
+        height: 1fr;
     }
 
     #setup-workspace {
@@ -53,12 +64,34 @@ class SetupWorkspace(Widget):
         margin-bottom: 1;
     }
 
+    .workspace-field {
+        height: 3;
+        margin-bottom: 1;
+    }
+
+    .workspace-field-label {
+        width: 16;
+        height: 3;
+        content-align: left middle;
+    }
+
     .workspace-input {
+        width: 1fr;
+    }
+
+    .workspace-actions {
+        height: auto;
+        margin-top: 1;
         margin-bottom: 1;
     }
 
     .workspace-button {
         margin-right: 1;
+    }
+
+    #tui-notes {
+        height: 7;
+        margin-bottom: 1;
     }
     """
 
@@ -96,90 +129,108 @@ class SetupWorkspace(Widget):
         with Horizontal(classes="workspace-row"):
             with Vertical(classes="workspace-panel"):
                 yield Static("基础参数", classes="workspace-title")
-                yield Static("输入目录")
-                yield Input(
-                    value=input_dir_text,
-                    placeholder="输入目录路径",
-                    id="tui-input-dir",
-                    classes="workspace-input",
-                )
-                yield Static("配置文件")
-                yield Input(
-                    value=config_text,
-                    placeholder="配置文件路径",
-                    id="tui-config-path",
-                    classes="workspace-input",
-                )
-                yield Static("运行 ID")
-                yield Input(
-                    placeholder="恢复运行时填写",
-                    id="tui-runtime-id",
-                    classes="workspace-input",
-                )
-                yield Static("日志根目录")
-                yield Input(
-                    value=str(self._log_root),
-                    placeholder="日志根目录",
-                    id="tui-log-root",
-                    classes="workspace-input",
-                )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("输入目录", classes="workspace-field-label")
+                    yield Input(
+                        value=input_dir_text,
+                        placeholder="输入目录路径",
+                        id="tui-input-dir",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("配置文件", classes="workspace-field-label")
+                    yield Input(
+                        value=config_text,
+                        placeholder="配置文件路径",
+                        id="tui-config-path",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("运行 ID", classes="workspace-field-label")
+                    yield Input(
+                        placeholder="恢复运行时填写",
+                        id="tui-runtime-id",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("日志根目录", classes="workspace-field-label")
+                    yield Input(
+                        value=str(self._log_root),
+                        placeholder="日志根目录",
+                        id="tui-log-root",
+                        classes="workspace-input",
+                    )
             with Vertical(classes="workspace-panel"):
                 yield Static("生成参数", classes="workspace-title")
-                yield Static("生成章节数")
-                yield Input(
-                    value=str(defaults.chapter_count),
-                    placeholder="生成章节数",
-                    id="tui-chapter-count",
-                    classes="workspace-input",
-                )
-                yield Static("起始章节")
-                yield Input(
-                    placeholder="留空则接在输入章节后",
-                    id="tui-start-chapter",
-                    classes="workspace-input",
-                )
-                yield Static("最低字数")
-                yield Input(
-                    value=str(defaults.min_chars),
-                    placeholder="最低字数",
-                    id="tui-min-chars",
-                    classes="workspace-input",
-                )
-                yield Static("最高字数")
-                yield Input(
-                    value=str(defaults.max_chars),
-                    placeholder="最高字数",
-                    id="tui-max-chars",
-                    classes="workspace-input",
-                )
-                yield Static("最大修订轮数")
-                yield Input(
-                    placeholder="留空使用配置",
-                    id="tui-max-revision-rounds",
-                    classes="workspace-input",
-                )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("生成章节数", classes="workspace-field-label")
+                    yield Input(
+                        value=str(defaults.chapter_count),
+                        placeholder="生成章节数",
+                        id="tui-chapter-count",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("起始章节", classes="workspace-field-label")
+                    yield Input(
+                        placeholder="留空则接在输入章节后",
+                        id="tui-start-chapter",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("最低字数", classes="workspace-field-label")
+                    yield Input(
+                        value=str(defaults.min_chars),
+                        placeholder="最低字数",
+                        id="tui-min-chars",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("最高字数", classes="workspace-field-label")
+                    yield Input(
+                        value=str(defaults.max_chars),
+                        placeholder="最高字数",
+                        id="tui-max-chars",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("最大修订轮数", classes="workspace-field-label")
+                    yield Input(
+                        placeholder="留空使用配置",
+                        id="tui-max-revision-rounds",
+                        classes="workspace-input",
+                    )
         with Horizontal(classes="workspace-row"):
             with Vertical(classes="workspace-panel"):
                 yield Static("输出与审批", classes="workspace-title")
-                yield Static("输出模式")
-                yield Input(
-                    value=defaults.output_mode or "",
-                    placeholder="留空使用配置，可填 output 或 writeback",
-                    id="tui-output-mode",
-                    classes="workspace-input",
-                )
-                yield Static("自动批准")
-                yield Input(
-                    value=_format_bool(defaults.auto_approve),
-                    placeholder="是或否",
-                    id="tui-auto-approve",
-                    classes="workspace-input",
-                )
-                with Horizontal():
+                with Horizontal(classes="workspace-field"):
+                    yield Static("输出模式", classes="workspace-field-label")
+                    yield Input(
+                        value=defaults.output_mode or "",
+                        placeholder="留空使用配置，可填 output 或 writeback",
+                        id="tui-output-mode",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-field"):
+                    yield Static("自动批准", classes="workspace-field-label")
+                    yield Input(
+                        value=_format_bool(defaults.auto_approve),
+                        placeholder="是或否",
+                        id="tui-auto-approve",
+                        classes="workspace-input",
+                    )
+                with Horizontal(classes="workspace-actions"):
                     yield Button("开始运行", id="run-pipeline", classes="workspace-button")
                     yield Button("恢复运行", id="resume-pipeline", classes="workspace-button")
             with Vertical(classes="workspace-panel"):
-                yield Static("审批区", classes="workspace-title")
+                yield Static("额外约束", classes="workspace-title")
+                yield TextArea(
+                    "",
+                    placeholder="可填写本次续写的额外 notes；世界观和设定仍会主要从正文推断",
+                    id="tui-notes",
+                    tab_behavior="focus",
+                    show_line_numbers=False,
+                )
                 yield Static("大纲、章节计划、场景计划和自审失败会进入审批点，可用 F4 查看。")
 
     @property
@@ -219,7 +270,12 @@ class SetupWorkspace(Widget):
         return Path(value) if value else Path("logs")
 
     def build_generation_options(self, *, resume: bool | None = None) -> GenerationOptions:
-        input_dir = _parse_required_path("输入目录", self._input_value("#tui-input-dir"))
+        input_dir_value = self._input_value("#tui-input-dir")
+        input_dir = (
+            None
+            if resume is True and not input_dir_value
+            else _parse_required_path("输入目录", input_dir_value)
+        )
         config_path = _parse_required_path("配置文件", self._input_value("#tui-config-path"))
         log_root = _parse_required_path("日志根目录", self._input_value("#tui-log-root"))
         runtime_id = _blank_to_none(self._input_value("#tui-runtime-id"))
@@ -269,6 +325,7 @@ class SetupWorkspace(Widget):
                 minimum=0,
             ),
             auto_approve=_parse_bool("自动批准", self._input_value("#tui-auto-approve")),
+            notes=self._text_area_value("#tui-notes"),
         )
 
     def set_status(self, status: str) -> None:
@@ -297,15 +354,17 @@ class SetupWorkspace(Widget):
         except Exception:
             return ""
 
+    def _text_area_value(self, selector: str) -> str:
+        try:
+            return self.query_one(selector, TextArea).text.strip()
+        except Exception:
+            return ""
+
 
 class DashboardScreen(Screen[None]):
     """Runtime dashboard with workflow inspection data."""
 
     DEFAULT_CSS = """
-    DashboardScreen {
-        padding: 1 2;
-    }
-
     #dashboard-workspace {
         height: auto;
         margin-bottom: 1;
@@ -349,24 +408,25 @@ class DashboardScreen(Screen[None]):
         runtime_overview = _read_runtime_overview(self._log_root, self._runtime_id)
 
         yield Header()
-        yield Static(
-            f"工作台\n输入目录: {input_dir_text}\n配置文件: {config_text}\n{runtime_overview}",
-            id="dashboard-workspace",
-        )
-        with Horizontal(classes="dashboard-row"):
-            with Vertical(classes="dashboard-panel"):
-                yield Static("状态", classes="dashboard-title")
-                yield Static(_read_run_status_text(self._log_root, self._runtime_id))
-            with Vertical(classes="dashboard-panel"):
-                yield Static("运行摘要", classes="dashboard-title")
-                yield Static(_read_run_summary(self._log_root, self._runtime_id))
-        with Horizontal(classes="dashboard-row"):
-            with Vertical(classes="dashboard-panel"):
-                yield Static("节点与产物", classes="dashboard-title")
-                yield Static(_read_runtime_lists(self._log_root, self._runtime_id))
-            with Vertical(classes="dashboard-panel"):
-                yield Static("审批、用量与事件", classes="dashboard-title")
-                yield Static(_read_runtime_activity(self._log_root, self._runtime_id))
+        with ScreenBody():
+            yield Static(
+                f"工作台\n输入目录: {input_dir_text}\n配置文件: {config_text}\n{runtime_overview}",
+                id="dashboard-workspace",
+            )
+            with Horizontal(classes="dashboard-row"):
+                with Vertical(classes="dashboard-panel"):
+                    yield Static("状态", classes="dashboard-title")
+                    yield Static(_read_run_status_text(self._log_root, self._runtime_id))
+                with Vertical(classes="dashboard-panel"):
+                    yield Static("运行摘要", classes="dashboard-title")
+                    yield Static(_read_run_summary(self._log_root, self._runtime_id))
+            with Horizontal(classes="dashboard-row"):
+                with Vertical(classes="dashboard-panel"):
+                    yield Static("节点与产物", classes="dashboard-title")
+                    yield Static(_read_runtime_lists(self._log_root, self._runtime_id))
+                with Vertical(classes="dashboard-panel"):
+                    yield Static("审批、用量与事件", classes="dashboard-title")
+                    yield Static(_read_runtime_activity(self._log_root, self._runtime_id))
         yield Footer()
 
 
@@ -374,10 +434,6 @@ class StatsScreen(Screen[None]):
     """Usage statistics backed by runtime summaries."""
 
     DEFAULT_CSS = """
-    StatsScreen {
-        padding: 1 2;
-    }
-
     #stats-workspace {
         height: auto;
         margin-bottom: 1;
@@ -394,10 +450,11 @@ class StatsScreen(Screen[None]):
         runtime_text = self._runtime_id or "暂无运行"
         summary = _read_state_section(self._log_root, self._runtime_id, "usage")
         yield Header()
-        yield Static(
-            f"统计\n运行 ID: {runtime_text}\n{summary}",
-            id="stats-workspace",
-        )
+        with ScreenBody():
+            yield Static(
+                f"统计\n运行 ID: {runtime_text}\n{summary}",
+                id="stats-workspace",
+            )
         yield Footer()
 
 
@@ -412,17 +469,18 @@ class RuntimeArtifactsScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(
-            "产物\n" + _read_state_section(self._log_root, self._runtime_id, "artifacts"),
-            id="artifacts-workspace",
-        )
-        with Vertical(id="artifact-diff-controls"):
-            yield Static("产物版本对比")
-            yield Input(placeholder="产物 ID", id="diff-artifact-id")
-            yield Input(placeholder="左侧版本号", id="diff-left-version")
-            yield Input(placeholder="右侧版本号", id="diff-right-version")
-            yield Button("显示差异", id="show-artifact-diff")
-            yield Static("", id="artifact-diff-output")
+        with ScreenBody():
+            yield Static(
+                "产物\n" + _read_state_section(self._log_root, self._runtime_id, "artifacts"),
+                id="artifacts-workspace",
+            )
+            with Vertical(id="artifact-diff-controls"):
+                yield Static("产物版本对比")
+                yield Input(placeholder="产物 ID", id="diff-artifact-id")
+                yield Input(placeholder="左侧版本号", id="diff-left-version")
+                yield Input(placeholder="右侧版本号", id="diff-right-version")
+                yield Button("显示差异", id="show-artifact-diff")
+                yield Static("", id="artifact-diff-output")
         yield Footer()
 
     @on(Button.Pressed, "#show-artifact-diff")
@@ -467,31 +525,36 @@ class RuntimeApprovalsScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(
-            "审批\n" + _read_approval_workspace(self._log_root, self._runtime_id),
-            id="approvals-workspace",
-        )
-        with Vertical(id="approval-controls"):
-            yield Input(placeholder="审批 ID", id="approval-id")
-            yield Input(placeholder="审批消息", id="approval-message")
-            yield Button("记录消息", id="record-approval-message")
-            yield Input(placeholder="产物 ID，可留空使用审批绑定产物", id="approval-artifact-id")
-            yield Input(
-                placeholder="产物类型 outline/chapter_plan/scene_plan", id="approval-artifact-type"
+        with ScreenBody():
+            yield Static(
+                "审批\n" + _read_approval_workspace(self._log_root, self._runtime_id),
+                id="approvals-workspace",
             )
-            yield Input(
-                placeholder="产物版本，可留空使用审批绑定版本",
-                id="approval-artifact-version",
-            )
-            yield Button("AI 修改产物", id="chat-update-artifact")
-            yield Button("批准产物", id="approve-artifact")
-            yield Input(placeholder="节点 ID", id="retry-node-id")
-            yield Button("重试节点", id="retry-node")
-            yield Input(placeholder="章节号", id="chapter-number")
-            with Horizontal():
-                yield Button("放弃章节", id="abandon-chapter")
-                yield Button("重写章节", id="rewrite-chapter")
-            yield Static("", id="approval-command-status")
+            with Vertical(id="approval-controls"):
+                yield Input(placeholder="审批 ID", id="approval-id")
+                yield Input(placeholder="审批消息", id="approval-message")
+                yield Button("记录消息", id="record-approval-message")
+                yield Input(
+                    placeholder="产物 ID，可留空使用审批绑定产物",
+                    id="approval-artifact-id",
+                )
+                yield Input(
+                    placeholder="产物类型 outline/chapter_plan/scene_plan",
+                    id="approval-artifact-type",
+                )
+                yield Input(
+                    placeholder="产物版本，可留空使用审批绑定版本",
+                    id="approval-artifact-version",
+                )
+                yield Button("AI 修改产物", id="chat-update-artifact")
+                yield Button("批准产物", id="approve-artifact")
+                yield Input(placeholder="节点 ID", id="retry-node-id")
+                yield Button("重试节点", id="retry-node")
+                yield Input(placeholder="章节号", id="chapter-number")
+                with Horizontal():
+                    yield Button("放弃章节", id="abandon-chapter")
+                    yield Button("重写章节", id="rewrite-chapter")
+                yield Static("", id="approval-command-status")
         yield Footer()
 
     @on(Button.Pressed, "#record-approval-message")
@@ -622,10 +685,11 @@ class RuntimeLogScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(
-            "日志\n" + _read_events(self._log_root, self._runtime_id),
-            id="events-workspace",
-        )
+        with ScreenBody():
+            yield Static(
+                "日志\n" + _read_events(self._log_root, self._runtime_id),
+                id="events-workspace",
+            )
         yield Footer()
 
 
