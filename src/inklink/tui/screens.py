@@ -827,8 +827,8 @@ def _format_dashboard_overview(
         f"配置文件: {config_text}",
         f"日志目录: {snapshot.log_dir or snapshot.log_root}",
     ]
-    if snapshot.error:
-        lines.append(f"错误: {snapshot.error}")
+    if snapshot.failure_error:
+        lines.append(f"错误: {snapshot.failure_error}")
     elif snapshot.state_error:
         lines.append(f"状态库: {snapshot.state_error}")
     stale_hint = snapshot.stale_hint
@@ -859,7 +859,7 @@ def _format_dashboard_status(snapshot: RunSnapshot) -> str:
 
 
 def _format_next_action(snapshot: RunSnapshot) -> str:
-    if snapshot.error:
+    if snapshot.failure_error:
         return (
             "运行失败。\n"
             "查看最近事件和当前节点；修复配置、网络或产物问题后，可回到首页恢复运行，"

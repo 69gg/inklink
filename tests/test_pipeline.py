@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -250,6 +251,50 @@ class DetailedUsageLLM(FakeToolLLM):
         )
 
 
+class FlakyToolPayloadLLM(FakeToolLLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed_once = False
+
+    async def call_tool(
+        self,
+        *,
+        task_type: str,
+        profile_name: str,
+        tool_name: str,
+        instructions: str,
+        input_text: str,
+        schema: dict[str, object],
+    ) -> ToolCallResult:
+        if tool_name == "record_chapter_analysis" and not self.failed_once:
+            self.failed_once = True
+            self.calls.append((task_type, tool_name))
+            raise json.JSONDecodeError("Unterminated string", '{"summary":"bad', 11)
+        return await super().call_tool(
+            task_type=task_type,
+            profile_name=profile_name,
+            tool_name=tool_name,
+            instructions=instructions,
+            input_text=input_text,
+            schema=schema,
+        )
+
+
+class AlwaysInvalidToolPayloadLLM(FakeToolLLM):
+    async def call_tool(
+        self,
+        *,
+        task_type: str,
+        profile_name: str,
+        tool_name: str,
+        instructions: str,
+        input_text: str,
+        schema: dict[str, object],
+    ) -> ToolCallResult:
+        self.calls.append((task_type, tool_name))
+        raise json.JSONDecodeError("Unterminated string", '{"summary":"bad', 11)
+
+
 def write_chapter(path: Path, title: str, body: str) -> None:
     path.write_text(f"title: {title}\n---\n{body}", encoding="utf-8")
 
@@ -456,6 +501,112 @@ async def test_pipeline_generates_chapter_outputs_and_stats(tmp_path: Path) -> N
     ]
     assert planning_inputs
     assert "原文片段" in planning_inputs[0]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_retries_invalid_tool_payload(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config_with_planning_auto_approval(config)
+    llm = FlakyToolPayloadLLM()
+
+    summary = await InklinkPipeline(llm=llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+        )
+    )
+
+    assert summary.status == "completed"
+    assert llm.failed_once is True
+    connection = sqlite3.connect(summary.log_dir / "state.sqlite")
+    try:
+        failed_calls = connection.execute(
+            "SELECT COUNT(*) FROM llm_calls WHERE status = 'failed'"
+        ).fetchone()[0]
+        retry_events = [
+            json.loads(line)
+            for line in (summary.log_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if '"llm_response_failed"' in line
+        ]
+    finally:
+        connection.close()
+    assert failed_calls == 1
+    assert retry_events[0]["payload"]["retrying"] is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_marks_run_failed_when_tool_payload_retries_exhaust(
+    tmp_path: Path,
+) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[models.default]
+api = "responses"
+model = "fake-model"
+api_key_env = "INKLINK_FAKE_KEY"
+max_retries = 1
+
+[tasks]
+drafting = "default"
+review = "default"
+""",
+        encoding="utf-8",
+    )
+    log_root = tmp_path / "logs"
+    llm = AlwaysInvalidToolPayloadLLM()
+
+    with pytest.raises(json.JSONDecodeError, match="Unterminated string"):
+        await InklinkPipeline(llm=llm).run(
+            GenerationOptions(
+                input_dir=novel,
+                config_path=config,
+                log_root=log_root,
+                chapter_count=1,
+                min_chars=8,
+                max_chars=80,
+            )
+        )
+
+    run_dir = next(log_root.iterdir())
+    connection = sqlite3.connect(run_dir / "state.sqlite")
+    connection.row_factory = sqlite3.Row
+    try:
+        run_status = connection.execute("SELECT status FROM runs").fetchone()["status"]
+        node = connection.execute(
+            "SELECT status, error_summary FROM nodes WHERE node_id = 'analyze_chapter:1'"
+        ).fetchone()
+        failed_calls = connection.execute(
+            "SELECT COUNT(*) FROM llm_calls WHERE status = 'failed'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    summary = json.loads((run_dir / "artifacts" / "run_summary.json").read_text(encoding="utf-8"))
+    events = [
+        json.loads(line)
+        for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert run_status == "failed"
+    assert node["status"] == "failed"
+    assert "Unterminated string" in node["error_summary"]
+    assert failed_calls == 2
+    assert summary["status"] == "failed"
+    assert "Unterminated string" in summary["error_summary"]
+    assert [event["event_type"] for event in events][-1] == "run_failed"
+    assert events[-2]["event_type"] == "llm_response_failed"
+    assert events[-2]["payload"]["retrying"] is False
 
 
 @pytest.mark.asyncio

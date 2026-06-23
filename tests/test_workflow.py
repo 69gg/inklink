@@ -699,6 +699,35 @@ def test_service_usage_stats_aggregates_optional_usage_fields(tmp_path: Path) ->
         ]
 
 
+def test_service_recent_events_skips_malformed_lines(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        run = service.start_run(project)
+        events_path = run.log_dir / "events.jsonl"
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write('{"timestamp":"bad","event_type":"partial","payload":{"text":"')
+            handle.write("\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "ok",
+                        "event_type": "after_bad_line",
+                        "payload": {"runtime_id": run.runtime_id},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+        events = service.recent_events(limit=5)
+
+    assert events[-1]["event_type"] == "after_bad_line"
+    assert all(event.get("event_type") != "partial" for event in events)
+
+
 def test_service_chapter_commands_allow_generated_chapter_numbers(tmp_path: Path) -> None:
     project = tmp_path / "novel"
     project.mkdir()

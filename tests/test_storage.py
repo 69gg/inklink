@@ -219,6 +219,55 @@ def test_state_store_upsert_node_updates_existing_row(tmp_path: Path) -> None:
         }
 
 
+def test_state_store_marks_running_work_failed(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        store.create_run(runtime_id="run-1", input_dir="/novel", status="running")
+        store.upsert_node(node_id="running-node", node_type="draft_scene", status="running")
+        store.upsert_node(node_id="done-node", node_type="load_project", status="completed")
+        running_call = store.create_llm_call(
+            runtime_id="run-1",
+            idempotency_key="running-key",
+            task_type="drafting",
+            profile="default",
+            api_type="responses",
+            model="fake-model",
+            attempt=1,
+            request={},
+        )
+        done_call = store.create_llm_call(
+            runtime_id="run-1",
+            idempotency_key="done-key",
+            task_type="review",
+            profile="default",
+            api_type="responses",
+            model="fake-model",
+            attempt=1,
+            request={},
+        )
+        store.complete_llm_call(
+            call_id=done_call,
+            request_id="req-done",
+            response={},
+            usage=NormalizedUsage(total_tokens=1),
+        )
+
+        failed_nodes = store.fail_running_nodes(error_summary="run failed")
+        failed_calls = store.fail_running_llm_calls(runtime_id="run-1", error="run failed")
+
+        assert failed_nodes == 1
+        assert failed_calls == 1
+        assert store.get_node("running-node")["status"] == "failed"
+        assert store.get_node("running-node")["error_summary"] == "run failed"
+        assert store.get_node("done-node")["status"] == "completed"
+        rows = store._connection.execute(
+            "SELECT id, status, error FROM llm_calls ORDER BY id"
+        ).fetchall()
+        assert [dict(row) for row in rows] == [
+            {"id": running_call, "status": "failed", "error": "run failed"},
+            {"id": done_call, "status": "succeeded", "error": None},
+        ]
+
+
 def test_state_store_records_node_dependencies_and_waiting_reason(tmp_path: Path) -> None:
     with StateStore.open(tmp_path / "state.sqlite") as store:
         store.upsert_node(

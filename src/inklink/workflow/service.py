@@ -494,8 +494,15 @@ class WorkflowService:
         path = self._current_run().run.log_dir / "events.jsonl"
         if not path.exists():
             return []
-        events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-        return [event for event in events[-limit:] if isinstance(event, dict)]
+        events: list[dict[str, object]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+        return events[-limit:]
 
     def close(self) -> None:
         first_error: BaseException | None = None

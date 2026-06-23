@@ -12,6 +12,7 @@ from inklink.tui.screens import (
     SetupWorkspace,
     StatsScreen,
     _format_approval_workspace,
+    _format_next_action,
     _format_node_tree,
 )
 from inklink.tui.snapshot import RunSnapshot
@@ -483,6 +484,19 @@ def test_tui_snapshot_reports_stale_progress(tmp_path) -> None:
     assert snapshot.stale_hint is not None
     assert "65 秒" in snapshot.stale_hint
     assert "drafting" in snapshot.stale_hint
+
+
+def test_tui_snapshot_uses_persisted_run_summary_error(tmp_path) -> None:
+    snapshot = RunSnapshot(
+        runtime_id="runtime",
+        log_root=tmp_path / "logs",
+        status="failed",
+        run_summary={"status": "failed", "error_summary": "模型返回了坏 JSON"},
+    )
+
+    assert snapshot.failure_error == "模型返回了坏 JSON"
+    assert snapshot.latest_message == "运行失败: 模型返回了坏 JSON"
+    assert "运行失败" in _format_next_action(snapshot)
 
 
 def test_tui_approval_workspace_shows_state_error(tmp_path) -> None:

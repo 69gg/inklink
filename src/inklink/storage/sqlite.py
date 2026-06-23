@@ -288,6 +288,21 @@ class StateStore:
         ).fetchall()
         return [_node_row_to_dict(row) for row in rows]
 
+    def fail_running_nodes(self, *, error_summary: str) -> int:
+        cursor = self._connection.execute(
+            """
+            UPDATE nodes
+            SET
+              status = 'failed',
+              error_summary = ?,
+              finished_at = CURRENT_TIMESTAMP
+            WHERE status = 'running'
+            """,
+            (error_summary,),
+        )
+        self._connection.commit()
+        return cursor.rowcount
+
     def get_successful_tool_payload(
         self,
         *,
@@ -415,6 +430,18 @@ class StateStore:
             (error, call_id),
         )
         self._connection.commit()
+
+    def fail_running_llm_calls(self, *, runtime_id: str, error: str) -> int:
+        cursor = self._connection.execute(
+            """
+            UPDATE llm_calls
+            SET status = 'failed', error = ?, finished_at = CURRENT_TIMESTAMP
+            WHERE runtime_id = ? AND status = 'running'
+            """,
+            (error, runtime_id),
+        )
+        self._connection.commit()
+        return cursor.rowcount
 
     def record_tool_call(
         self,

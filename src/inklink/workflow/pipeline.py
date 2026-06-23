@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from inklink.atomic import atomic_move_text, atomic_write_text
 from inklink.chapters import Chapter, load_chapters
@@ -77,6 +77,10 @@ class WriteOutputApprovalRequired(RuntimeError):
         self.chapter_number = chapter_number
         self.target = target
         self.pending_file = pending_file
+
+
+class ToolPayloadParseError(ValueError):
+    pass
 
 
 class ToolCallResult(BaseModel):
@@ -273,6 +277,7 @@ class PipelineSummary(BaseModel):
     status: str = "completed"
     waiting_approval_id: str | None = None
     waiting_node_id: str | None = None
+    error_summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1314,6 +1319,23 @@ class InklinkPipeline:
                     status="completed",
                 )
                 return summary
+            except Exception as exc:
+                _record_failed_run(
+                    runtime_id=run.runtime_id,
+                    log_dir=run.log_dir,
+                    store=store,
+                    event_log=event_log,
+                    stats=_run_stats_from_store(store) or stats,
+                    error_summary=str(exc),
+                )
+                self._progress(
+                    f"运行失败: {exc}",
+                    runtime_id=run.runtime_id,
+                    phase="failed",
+                    status="failed",
+                    severity="error",
+                )
+                raise
             finally:
                 store.close()
 
@@ -1377,22 +1399,32 @@ class InklinkPipeline:
                 depends_on=["load_project"],
                 input_version=_hash_json(_chapter_payload(chapter) | {"depth": depth}),
             )
-            analysis = await self._call_model(
-                config=config,
-                runtime_id=runtime_id,
-                store=store,
-                stats=stats,
-                event_log=event_log,
-                task_type="chapter_extraction",
-                tool_spec=_TOOL_SPECS["record_chapter_analysis"],
-                input_payload={
-                    "chapter_number": chapter.number,
-                    "title": chapter.title,
-                    "body": chapter.body,
-                    "depth": depth,
-                    "generation": 1,
-                },
-            )
+            try:
+                analysis = await self._call_model(
+                    config=config,
+                    runtime_id=runtime_id,
+                    store=store,
+                    stats=stats,
+                    event_log=event_log,
+                    task_type="chapter_extraction",
+                    tool_spec=_TOOL_SPECS["record_chapter_analysis"],
+                    input_payload={
+                        "chapter_number": chapter.number,
+                        "title": chapter.title,
+                        "body": chapter.body,
+                        "depth": depth,
+                        "generation": 1,
+                    },
+                )
+            except Exception as exc:
+                store.upsert_node(
+                    node_id=node_id,
+                    node_type="analyze_chapter",
+                    status="failed",
+                    depends_on=["load_project"],
+                    error_summary=str(exc),
+                )
+                raise
             version = store.upsert_artifact(
                 artifact_id=f"chapter_analysis:{chapter.number}",
                 artifact_type="chapter_analysis",
@@ -2117,116 +2149,148 @@ class InklinkPipeline:
             )
             return tool_spec.model.model_validate(cached_payload)
 
-        attempt = store.next_llm_attempt(key)
-        llm_call_id = store.create_llm_call(
-            runtime_id=runtime_id,
-            idempotency_key=key,
-            task_type=task_type,
-            profile=profile_name,
-            api_type=profile.api,
-            model=profile.model,
-            attempt=attempt,
-            request={
-                "tool_name": tool_spec.name,
-                "generation": generation,
-                "input": (
-                    input_payload if config.runtime.save_full_prompts else _hash_json(input_payload)
-                ),
-            },
-        )
-        event_log.write(
-            "llm_request",
-            {
-                "task_type": task_type,
-                "profile": profile_name,
-                "tool_name": tool_spec.name,
-                "idempotency_key": key,
-                "attempt": attempt,
-                "generation": generation,
-            },
-        )
-        self._progress(
-            f"请求模型: {task_type}（{profile_name}/{profile.model}）",
-            runtime_id=runtime_id,
-            chapter_number=chapter_number,
-            phase=phase,
-            status="running",
-            llm_task_type=task_type,
-            llm_profile=profile_name,
-        )
-        try:
-            result = await self._llm.call_tool(
+        max_attempts = profile.max_retries + 1
+        last_error: Exception | None = None
+        for local_attempt_index in range(max_attempts):
+            attempt = store.next_llm_attempt(key)
+            llm_call_id = store.create_llm_call(
+                runtime_id=runtime_id,
+                idempotency_key=key,
                 task_type=task_type,
-                profile_name=profile_name,
-                tool_name=tool_spec.name,
-                instructions=_instructions_for(tool_spec.name),
-                input_text=payload_text,
-                schema=tool_spec.schema,
+                profile=profile_name,
+                api_type=profile.api,
+                model=profile.model,
+                attempt=attempt,
+                request={
+                    "tool_name": tool_spec.name,
+                    "generation": generation,
+                    "input": (
+                        input_payload
+                        if config.runtime.save_full_prompts
+                        else _hash_json(input_payload)
+                    ),
+                },
             )
-        except Exception as exc:
-            store.fail_llm_call(call_id=llm_call_id, error=str(exc))
+            event_log.write(
+                "llm_request",
+                {
+                    "task_type": task_type,
+                    "profile": profile_name,
+                    "tool_name": tool_spec.name,
+                    "idempotency_key": key,
+                    "attempt": attempt,
+                    "generation": generation,
+                },
+            )
             self._progress(
-                f"模型请求失败: {task_type}: {exc}",
+                f"请求模型: {task_type}（{profile_name}/{profile.model}，attempt {attempt}）",
                 runtime_id=runtime_id,
                 chapter_number=chapter_number,
                 phase=phase,
-                status="failed",
+                status="running",
                 llm_task_type=task_type,
                 llm_profile=profile_name,
-                severity="error",
             )
-            raise
-        validated = tool_spec.model.model_validate(result.payload)
-        stats.add(result)
-        store.complete_llm_call(
-            call_id=llm_call_id,
-            request_id=result.request_id,
-            response={
-                "tool_name": tool_spec.name,
-                "payload": (
-                    result.payload
-                    if config.runtime.save_full_prompts
-                    else _hash_json(result.payload)
-                ),
-            },
-            usage=result.usage,
-        )
-        store.record_tool_call(
-            llm_call_id=llm_call_id,
-            idempotency_key=key,
-            name=tool_spec.name,
-            call_id=result.tool_call_id,
-            arguments=result.payload,
-            result={"ok": True},
-        )
-        event_log.write(
-            "llm_response",
-            {
-                "task_type": task_type,
-                "profile": result.profile_name,
-                "model": result.model,
-                "request_id": result.request_id,
-                "idempotency_key": key,
-                "usage": result.usage.model_dump(mode="json", exclude_none=True),
-            },
-        )
-        self._progress(
-            f"模型完成: {task_type}",
-            runtime_id=runtime_id,
-            chapter_number=chapter_number,
-            phase=phase,
-            status="completed",
-            llm_task_type=task_type,
-            llm_profile=profile_name,
-        )
-        event_log.write(
-            "tool_result",
-            {
-                "tool_name": tool_spec.name,
-                "payload": result.payload,
-            },
-        )
-        return validated
+            try:
+                result = await self._llm.call_tool(
+                    task_type=task_type,
+                    profile_name=profile_name,
+                    tool_name=tool_spec.name,
+                    instructions=_instructions_for(tool_spec.name),
+                    input_text=payload_text,
+                    schema=tool_spec.schema,
+                )
+                validated = tool_spec.model.model_validate(result.payload)
+            except Exception as exc:
+                last_error = exc
+                store.fail_llm_call(call_id=llm_call_id, error=str(exc))
+                should_retry = local_attempt_index + 1 < max_attempts and _is_retryable_llm_error(
+                    exc
+                )
+                event_log.write(
+                    "llm_response_failed",
+                    {
+                        "task_type": task_type,
+                        "profile": profile_name,
+                        "tool_name": tool_spec.name,
+                        "idempotency_key": key,
+                        "attempt": attempt,
+                        "generation": generation,
+                        "error": str(exc),
+                        "retrying": should_retry,
+                    },
+                )
+                self._progress(
+                    (
+                        f"模型请求失败，准备重试: {task_type}: {exc}"
+                        if should_retry
+                        else f"模型请求失败: {task_type}: {exc}"
+                    ),
+                    runtime_id=runtime_id,
+                    chapter_number=chapter_number,
+                    phase=phase,
+                    status="running" if should_retry else "failed",
+                    llm_task_type=task_type,
+                    llm_profile=profile_name,
+                    severity="warning" if should_retry else "error",
+                )
+                if should_retry:
+                    continue
+                raise
+            stats.add(result)
+            store.complete_llm_call(
+                call_id=llm_call_id,
+                request_id=result.request_id,
+                response={
+                    "tool_name": tool_spec.name,
+                    "payload": (
+                        result.payload
+                        if config.runtime.save_full_prompts
+                        else _hash_json(result.payload)
+                    ),
+                },
+                usage=result.usage,
+            )
+            store.record_tool_call(
+                llm_call_id=llm_call_id,
+                idempotency_key=key,
+                name=tool_spec.name,
+                call_id=result.tool_call_id,
+                arguments=result.payload,
+                result={"ok": True},
+            )
+            event_log.write(
+                "llm_response",
+                {
+                    "task_type": task_type,
+                    "profile": result.profile_name,
+                    "model": result.model,
+                    "request_id": result.request_id,
+                    "idempotency_key": key,
+                    "attempt": attempt,
+                    "usage": result.usage.model_dump(mode="json", exclude_none=True),
+                },
+            )
+            self._progress(
+                f"模型完成: {task_type}",
+                runtime_id=runtime_id,
+                chapter_number=chapter_number,
+                phase=phase,
+                status="completed",
+                llm_task_type=task_type,
+                llm_profile=profile_name,
+            )
+            event_log.write(
+                "tool_result",
+                {
+                    "tool_name": tool_spec.name,
+                    "payload": result.payload,
+                },
+            )
+            return validated
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"model call failed without error: {task_type}")
 
 
 def _bucket(target: dict[str, UsageBucket], key: str) -> UsageBucket:
@@ -2270,6 +2334,12 @@ def _chapter_number_from_call_payload(payload: Mapping[str, object]) -> int | No
         if isinstance(value, int) and not isinstance(value, bool):
             return value
     return None
+
+
+def _is_retryable_llm_error(exc: Exception) -> bool:
+    if isinstance(exc, ToolPayloadParseError | json.JSONDecodeError | ValidationError):
+        return True
+    return isinstance(exc, ValueError) and str(exc).startswith("model did not call expected tool")
 
 
 def _sum_usage_buckets(buckets: Iterable[UsageBucket]) -> UsageBucket:
@@ -2608,9 +2678,15 @@ def _tool_call_from_response(
 
 
 def _payload_from_tool_call(tool_call: LLMToolCall) -> dict[str, object]:
-    parsed = json.loads(tool_call.arguments_json)
+    try:
+        parsed = json.loads(tool_call.arguments_json)
+    except json.JSONDecodeError as exc:
+        raise ToolPayloadParseError(
+            f"tool {tool_call.name} returned invalid JSON arguments: "
+            f"{exc.msg} at line {exc.lineno} column {exc.colno}"
+        ) from exc
     if not isinstance(parsed, dict):
-        raise ValueError(f"tool {tool_call.name} returned non-object arguments")
+        raise ToolPayloadParseError(f"tool {tool_call.name} returned non-object arguments")
     return cast(dict[str, object], parsed)
 
 
@@ -3196,6 +3272,48 @@ def _pause_for_write_output(
             "chapter_number": chapter_number,
             "target": str(target),
             "pending_file": str(pending_file),
+        },
+    )
+    return summary
+
+
+def _record_failed_run(
+    *,
+    runtime_id: str,
+    log_dir: Path,
+    store: StateStore,
+    event_log: JsonlEventLog,
+    stats: RunStats,
+    error_summary: str,
+) -> PipelineSummary:
+    failed_nodes = store.fail_running_nodes(error_summary=f"run failed: {error_summary}")
+    failed_llm_calls = store.fail_running_llm_calls(runtime_id=runtime_id, error=error_summary)
+    summary = PipelineSummary(
+        runtime_id=runtime_id,
+        log_dir=log_dir,
+        generated_chapters=[],
+        output_files=[],
+        stats=stats,
+        status="failed",
+        error_summary=error_summary,
+    )
+    artifacts_dir = log_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(artifacts_dir / "run_summary.json", summary.model_dump(mode="json"))
+    store.upsert_artifact(
+        artifact_id="run_summary",
+        artifact_type="run_summary",
+        payload=summary.model_dump(mode="json"),
+        is_approved=True,
+    )
+    store.update_run_status(runtime_id, "failed")
+    event_log.write(
+        "run_failed",
+        {
+            "runtime_id": runtime_id,
+            "error": error_summary,
+            "failed_running_nodes": failed_nodes,
+            "failed_running_llm_calls": failed_llm_calls,
         },
     )
     return summary

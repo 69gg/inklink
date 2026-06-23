@@ -49,6 +49,13 @@ class RunSnapshot:
     state_error: str | None = None
 
     @property
+    def failure_error(self) -> str | None:
+        if self.error:
+            return self.error
+        summary_error = self.run_summary.get("error_summary")
+        return summary_error if isinstance(summary_error, str) and summary_error else None
+
+    @property
     def waiting_approval(self) -> dict[str, object] | None:
         progress_approval_id = (
             self.latest_progress.waiting_approval_id if self.latest_progress is not None else None
@@ -116,8 +123,8 @@ class RunSnapshot:
 
     @property
     def latest_message(self) -> str:
-        if self.error:
-            return f"运行失败: {self.error}"
+        if self.failure_error:
+            return f"运行失败: {self.failure_error}"
         if self.latest_progress is not None:
             return self.latest_progress.message
         if self.waiting_approval_id:
