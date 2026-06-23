@@ -191,6 +191,34 @@ def workflow_message(
         typer.echo(result.message)
 
 
+@workflow_app.command("chat-update")
+def workflow_chat_update(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    approval_id: Annotated[str, typer.Argument(help="Approval ID.")],
+    artifact_id: Annotated[str, typer.Argument(help="Artifact ID.")],
+    artifact_type: Annotated[
+        str,
+        typer.Argument(help="Artifact type: outline, chapter_plan, or scene_plan."),
+    ],
+    content: Annotated[str, typer.Argument(help="User instruction for the artifact update.")],
+    config: Annotated[Path, typer.Option(help="Path to config.toml.")] = Path("config.toml"),
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Ask the configured LLM to update an approval artifact through update_* tools."""
+    version = asyncio.run(
+        _chat_update_artifact(
+            runtime_id=runtime_id,
+            approval_id=approval_id,
+            artifact_id=artifact_id,
+            artifact_type=artifact_type,
+            content=content,
+            config=config,
+            log_root=log_root,
+        )
+    )
+    typer.echo(f"updated {artifact_id}@{version}")
+
+
 @workflow_app.command("approve")
 def workflow_approve(
     runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
@@ -246,3 +274,29 @@ def workflow_rewrite(
     with WorkflowService(log_root=log_root) as service:
         service.resume_run(runtime_id)
         typer.echo(service.rewrite_chapter(chapter_number).message)
+
+
+async def _chat_update_artifact(
+    *,
+    runtime_id: str,
+    approval_id: str,
+    artifact_id: str,
+    artifact_type: str,
+    content: str,
+    config: Path,
+    log_root: Path,
+) -> int:
+    app_config = load_config(config)
+    api_keys = {
+        name: os.environ.get(profile.api_key_env) for name, profile in app_config.models.items()
+    }
+    llm = OpenAIToolLLM(app_config, api_keys)
+    return await InklinkPipeline(llm=llm).update_artifact_with_chat(
+        runtime_id=runtime_id,
+        log_root=log_root,
+        config_path=config,
+        approval_id=approval_id,
+        artifact_id=artifact_id,
+        artifact_type=artifact_type,
+        user_message=content,
+    )

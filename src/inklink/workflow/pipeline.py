@@ -20,12 +20,15 @@ from inklink.domain.models import (
     ChapterAnalysis,
     ChapterContract,
     ChapterPlan,
+    ChapterPlanUpdate,
     ChapterReview,
     DraftChapter,
     OutlineProposal,
+    OutlineUpdate,
     RangeSummary,
     SceneDraft,
     ScenePlan,
+    ScenePlanUpdate,
     StoryState,
 )
 from inklink.llm.limiter import ProfileLimiter
@@ -216,6 +219,71 @@ class _DraftPackage:
 class InklinkPipeline:
     def __init__(self, llm: ToolLLM) -> None:
         self._llm = llm
+
+    async def update_artifact_with_chat(
+        self,
+        *,
+        runtime_id: str,
+        log_root: Path,
+        config_path: Path,
+        approval_id: str,
+        artifact_id: str,
+        artifact_type: str,
+        user_message: str,
+    ) -> int:
+        config = load_config(config_path)
+        with WorkflowService(log_root=log_root) as service:
+            run = service.resume_run(runtime_id)
+            event_log = JsonlEventLog(run.log_dir / "events.jsonl")
+            store = StateStore.open(run.log_dir / "state.sqlite")
+            try:
+                latest = store.get_latest_artifact(artifact_id)
+                if latest is None:
+                    raise KeyError(f"artifact not found: {artifact_id}")
+                service.record_approval_message(
+                    approval_id=approval_id,
+                    role="user",
+                    content=user_message,
+                )
+                tool_spec = _tool_spec_for_artifact_update(artifact_type)
+                updated = await self._call_model(
+                    config=config,
+                    runtime_id=runtime_id,
+                    store=store,
+                    stats=RunStats(),
+                    event_log=event_log,
+                    task_type=_chat_task_for_artifact(artifact_type),
+                    tool_spec=tool_spec,
+                    approval_messages_hash=store.approval_messages_hash(approval_id),
+                    input_payload={
+                        "approval_id": approval_id,
+                        "artifact_id": artifact_id,
+                        "artifact_type": artifact_type,
+                        "current_artifact": latest["payload"],
+                        "user_message": user_message,
+                    },
+                )
+                version = store.upsert_artifact(
+                    artifact_id=artifact_id,
+                    artifact_type=artifact_type,
+                    payload=updated.model_dump(mode="json"),
+                    is_draft=True,
+                    is_approved=False,
+                    approval_id=approval_id,
+                )
+                event_log.write(
+                    "approval_artifact_updated",
+                    {
+                        "runtime_id": runtime_id,
+                        "approval_id": approval_id,
+                        "artifact_id": artifact_id,
+                        "artifact_type": artifact_type,
+                        "version": version,
+                    },
+                )
+                return version
+            finally:
+                store.close()
 
     async def run(self, options: GenerationOptions) -> PipelineSummary:
         config = load_config(options.config_path)
@@ -1111,15 +1179,30 @@ _TOOL_SPECS: dict[str, _ToolSpec] = {
         model=OutlineProposal,
         schema=_tool_schema("propose_outline", OutlineProposal),
     ),
+    "update_outline": _ToolSpec(
+        name="update_outline",
+        model=OutlineUpdate,
+        schema=_tool_schema("update_outline", OutlineUpdate),
+    ),
     "propose_chapter_plan": _ToolSpec(
         name="propose_chapter_plan",
         model=_ChapterPlanTool,
         schema=_tool_schema("propose_chapter_plan", _ChapterPlanTool),
     ),
+    "update_chapter_plan": _ToolSpec(
+        name="update_chapter_plan",
+        model=ChapterPlanUpdate,
+        schema=_tool_schema("update_chapter_plan", ChapterPlanUpdate),
+    ),
     "propose_scene_plan": _ToolSpec(
         name="propose_scene_plan",
         model=ScenePlan,
         schema=_tool_schema("propose_scene_plan", ScenePlan),
+    ),
+    "update_scene_plan": _ToolSpec(
+        name="update_scene_plan",
+        model=ScenePlanUpdate,
+        schema=_tool_schema("update_scene_plan", ScenePlanUpdate),
     ),
     "submit_scene_draft": _ToolSpec(
         name="submit_scene_draft",
@@ -1163,6 +1246,26 @@ def _normalize_chapter_contracts(
             )
         )
     return normalized
+
+
+def _tool_spec_for_artifact_update(artifact_type: str) -> _ToolSpec:
+    if artifact_type == "outline":
+        return _TOOL_SPECS["update_outline"]
+    if artifact_type == "chapter_plan":
+        return _TOOL_SPECS["update_chapter_plan"]
+    if artifact_type == "scene_plan":
+        return _TOOL_SPECS["update_scene_plan"]
+    raise ValueError(f"artifact_type does not support chat updates: {artifact_type}")
+
+
+def _chat_task_for_artifact(artifact_type: str) -> str:
+    if artifact_type == "outline":
+        return "outline_chat"
+    if artifact_type == "chapter_plan":
+        return "chapter_planning"
+    if artifact_type == "scene_plan":
+        return "scene_chat"
+    raise ValueError(f"artifact_type does not support chat updates: {artifact_type}")
 
 
 def _deep_analysis_start(chapters: list[Chapter], config: AppConfig) -> int:

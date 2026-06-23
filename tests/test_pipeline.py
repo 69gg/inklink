@@ -80,6 +80,12 @@ class FakeToolLLM(ToolLLM):
                 "outline": "下一章林秋进入密室，确认旧钥匙能唤醒青灯。",
                 "notes": ["保留门后悬念"],
             }
+        if tool_name == "update_outline":
+            return {
+                "outline": "修改后的大纲",
+                "change_summary": "强化冲突",
+                "notes": ["保留门后悬念"],
+            }
         if tool_name == "propose_chapter_plan":
             return {
                 "chapters": [
@@ -323,6 +329,42 @@ async def test_pipeline_resume_reuses_successful_calls_and_completed_output(
     assert second.output_files == first.output_files
     assert second_llm.calls == []
     assert second.stats.total_calls == first.stats.total_calls
+
+
+@pytest.mark.asyncio
+async def test_pipeline_updates_approval_artifact_with_chat(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+    log_root = tmp_path / "logs"
+    from inklink.workflow.service import WorkflowService
+
+    service = WorkflowService(log_root=log_root)
+    run = service.start_run(novel)
+    first_version = service.update_artifact(
+        artifact_id="outline",
+        artifact_type="outline",
+        payload={"outline": "初稿", "notes": []},
+        approval_id="outline",
+    )
+    service.close()
+    llm = FakeToolLLM()
+
+    second_version = await InklinkPipeline(llm=llm).update_artifact_with_chat(
+        runtime_id=run.runtime_id,
+        log_root=log_root,
+        config_path=config,
+        approval_id="outline",
+        artifact_id="outline",
+        artifact_type="outline",
+        user_message="强化冲突",
+    )
+
+    assert first_version == 1
+    assert second_version == 2
+    assert ("outline_chat", "update_outline") in llm.calls
 
 
 @pytest.mark.asyncio

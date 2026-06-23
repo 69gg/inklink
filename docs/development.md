@@ -35,6 +35,7 @@ uv run inklink run ./novel --config config.toml --execute \
 uv run inklink workflow info <runtime_id>
 uv run inklink workflow stats <runtime_id>
 uv run inklink workflow message <runtime_id> outline "请强化冲突"
+uv run inklink workflow chat-update <runtime_id> outline outline outline "请强化冲突"
 uv run inklink workflow approve <runtime_id> outline outline 1
 ```
 

@@ -203,3 +203,38 @@ def test_cli_workflow_commands_operate_existing_runtime(tmp_path: Path) -> None:
     assert "generation=3" in rewrite.output
     assert stats.exit_code == 0
     assert "no usage rows" in stats.output
+
+
+def test_cli_workflow_chat_update_invokes_runner(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_chat_update_artifact(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 7
+
+    monkeypatch.setattr("inklink.cli._chat_update_artifact", fake_chat_update_artifact)
+    result = runner.invoke(
+        app,
+        [
+            "workflow",
+            "chat-update",
+            "runtime",
+            "outline",
+            "outline",
+            "outline",
+            "强化冲突",
+            "--config",
+            str(tmp_path / "config.toml"),
+            "--log-root",
+            str(tmp_path / "logs"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "updated outline@7" in result.output
+    assert captured["runtime_id"] == "runtime"
+    assert captured["artifact_type"] == "outline"
+    assert captured["content"] == "强化冲突"
