@@ -235,6 +235,18 @@ def test_state_store_records_node_dependencies_and_waiting_reason(tmp_path: Path
         assert node["input_version"] == "chapter_draft:3@1"
 
 
+def test_state_store_invalidates_single_node_for_manual_retry(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        store.upsert_node(node_id="review_chapter:3", node_type="review_chapter", status="failed")
+
+        assert store.invalidate_node("review_chapter:3", reason="manual retry requested") is True
+        assert store.invalidate_node("missing", reason="manual retry requested") is False
+        node = store.get_node("review_chapter:3")
+
+    assert node["status"] == "invalidated"
+    assert node["error_summary"] == "manual retry requested"
+
+
 def test_state_store_raises_key_error_for_missing_records(tmp_path: Path) -> None:
     with StateStore.open(tmp_path / "state.sqlite") as store:
         with pytest.raises(KeyError, match="run-missing"):

@@ -655,6 +655,27 @@ class StateStore:
             self._connection.commit()
         return node_ids
 
+    def invalidate_node(self, node_id: str, *, reason: str) -> bool:
+        row = self._connection.execute(
+            "SELECT node_id FROM nodes WHERE node_id = ?",
+            (node_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        self._connection.execute(
+            """
+            UPDATE nodes
+            SET
+              status = 'invalidated',
+              error_summary = ?,
+              finished_at = CURRENT_TIMESTAMP
+            WHERE node_id = ?
+            """,
+            (reason, node_id),
+        )
+        self._connection.commit()
+        return True
+
     def create_or_update_approval(
         self,
         *,

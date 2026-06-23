@@ -277,16 +277,24 @@ class WorkflowService:
         if not node_id.strip() or node_id != node_id.strip():
             raise ValueError("node_id must not be empty or contain leading/trailing whitespace")
         active_run = self._current_writable_run()
+        invalidated = active_run.store.invalidate_node(
+            node_id,
+            reason="manual retry requested",
+        )
         active_run.event_log.write(
             "node_retry_requested",
             {
                 "runtime_id": active_run.run.runtime_id,
                 "node_id": node_id,
+                "invalidated": invalidated,
             },
         )
         return CommandResult(
             accepted=True,
-            message=f"accepted retry_node for node {node_id}",
+            message=(
+                f"accepted retry_node for node {node_id}; "
+                f"{'invalidated' if invalidated else 'node not found'}"
+            ),
         )
 
     def record_approval_message(
@@ -302,11 +310,21 @@ class WorkflowService:
             raise ValueError("content must not be empty")
         active_run = self._current_writable_run()
         message_id = uuid4().hex
+        existing = active_run.store.get_approval(approval_id)
+        existing_artifact_version = (
+            _optional_int(existing["artifact_version"]) if existing is not None else None
+        )
         active_run.store.create_or_update_approval(
             approval_id=approval_id,
-            approval_type=approval_id,
-            status="waiting",
-            auto_approve=False,
+            approval_type=str(existing["approval_type"]) if existing is not None else approval_id,
+            status=str(existing["status"]) if existing is not None else "waiting",
+            auto_approve=bool(existing["auto_approve"]) if existing is not None else False,
+            artifact_id=(
+                str(existing["artifact_id"])
+                if existing is not None and existing["artifact_id"] is not None
+                else None
+            ),
+            artifact_version=existing_artifact_version,
         )
         active_run.store.add_message(
             message_id=message_id,
@@ -545,6 +563,14 @@ def _parse_usage_json(value: object) -> dict[str, int]:
         if isinstance(item, int) and not isinstance(item, bool):
             parsed[key] = item
     return parsed
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return None
 
 
 def _add_optional_tokens(current: int | None, value: int | None) -> int | None:

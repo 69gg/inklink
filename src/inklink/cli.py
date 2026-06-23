@@ -44,6 +44,10 @@ def run(
     ] = None,
     min_chars: Annotated[int, typer.Option(help="Minimum Chinese characters per chapter.")] = 800,
     max_chars: Annotated[int, typer.Option(help="Maximum Chinese characters per chapter.")] = 1800,
+    max_revision_rounds: Annotated[
+        int | None,
+        typer.Option(help="Override maximum automatic revision rounds."),
+    ] = None,
     output_mode: Annotated[
         str | None,
         typer.Option(help="Override output mode: output or writeback."),
@@ -73,6 +77,7 @@ def run(
                 start_chapter=start_chapter,
                 min_chars=min_chars,
                 max_chars=max_chars,
+                max_revision_rounds=max_revision_rounds,
                 auto_approve=auto_approve,
             )
         )
@@ -99,6 +104,7 @@ async def _run_pipeline(
     start_chapter: int | None,
     min_chars: int,
     max_chars: int,
+    max_revision_rounds: int | None,
     auto_approve: bool,
 ) -> PipelineSummary:
     app_config = load_config(config)
@@ -117,6 +123,7 @@ async def _run_pipeline(
             start_chapter=start_chapter,
             min_chars=min_chars,
             max_chars=max_chars,
+            max_revision_rounds=max_revision_rounds,
             auto_approve=auto_approve,
         )
     )

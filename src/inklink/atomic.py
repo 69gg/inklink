@@ -39,6 +39,14 @@ def atomic_write_text(target: Path, content: str) -> None:
         raise
 
 
+def atomic_move_text(source: Path, target: Path) -> None:
+    """Atomically replace target with source text, even when source is on another filesystem."""
+
+    content = source.read_text(encoding="utf-8")
+    atomic_write_text(target, content)
+    source.unlink(missing_ok=True)
+
+
 def _fsync_directory(directory: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     fd = os.open(directory, flags)

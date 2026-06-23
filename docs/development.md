@@ -36,11 +36,14 @@ uv run inklink workflow info <runtime_id>
 uv run inklink workflow stats <runtime_id>
 uv run inklink workflow nodes <runtime_id>
 uv run inklink workflow artifacts <runtime_id>
+uv run inklink workflow artifact <runtime_id> outline --version 1
 uv run inklink workflow approvals <runtime_id>
+uv run inklink workflow messages <runtime_id> --approval-id outline
 uv run inklink workflow events <runtime_id>
 uv run inklink workflow message <runtime_id> outline "请强化冲突"
 uv run inklink workflow chat-update <runtime_id> outline outline outline "请强化冲突"
 uv run inklink workflow approve <runtime_id> outline outline 1
+uv run inklink workflow retry <runtime_id> draft-1
 uv run inklink workflow abandon <runtime_id> 3
 uv run inklink workflow rewrite <runtime_id> 3
 ```
@@ -70,7 +73,7 @@ uv run pytest tests/test_config.py -q
 | --- | --- |
 | `src/inklink/config.py` | TOML 读取、空字符串归一、Pydantic 配置校验、SDK 参数映射。 |
 | `src/inklink/chapters.py` | 严格章节文件发现、UTF-8/BOM 读取、换行规范化和 `title:`/`---` 格式校验。 |
-| `src/inklink/atomic.py` | 同目录临时文件、`fsync` 和 `os.replace` 原子写入。 |
+| `src/inklink/atomic.py` | 同目录临时文件、`fsync`、`os.replace` 原子写入，以及跨目录来源到目标目录的原子文本移动。 |
 | `src/inklink/locks.py` | 输入目录级运行锁和 `.inklink.lock` 标记。 |
 | `src/inklink/domain/models.py` | 章节合同、草稿、伏笔、检查报告等领域模型。 |
 | `src/inklink/domain/checks.py` | 中文字数、章节合同、必需人物/关键词和伏笔状态确定性检查。 |

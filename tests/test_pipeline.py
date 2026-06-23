@@ -46,19 +46,62 @@ class FakeToolLLM(ToolLLM):
 
     def _payload_for(self, tool_name: str, input_text: str) -> dict[str, object]:
         if tool_name == "record_chapter_analysis":
-            chapter_number = 1
-            if '"chapter_number": 2' in input_text or "第二章" in input_text:
-                chapter_number = 2
-            if '"chapter_number": 3' in input_text or "第三章" in input_text:
-                chapter_number = 3
+            request = json.loads(input_text)
+            chapter_number = int(request.get("chapter_number", 1))
+            is_deep = request.get("depth") == "deep"
             return {
                 "chapter_number": chapter_number,
                 "summary": f"第{chapter_number}章分析",
                 "characters": ["林秋"],
+                "character_facts": [
+                    {
+                        "entity_id": "林秋",
+                        "aliases": ["秋"],
+                        "status": "active",
+                        "traits": ["谨慎"],
+                        "relationships": [],
+                    }
+                ],
                 "worldbuilding": ["青灯会回应钥匙"],
+                "worldbuilding_facts": [
+                    {
+                        "rule_id": f"world:{chapter_number}:lamp",
+                        "description": "青灯会回应钥匙",
+                        "related_entities": ["林秋"],
+                        "keywords": ["青灯", "旧钥匙"],
+                        "importance": 4,
+                    }
+                ],
                 "plot_threads": ["旧钥匙的来历"],
+                "plot_thread_facts": (
+                    [
+                        {
+                            "thread_id": "thread:key-origin",
+                            "description": "旧钥匙的来历",
+                            "status": "seeded",
+                            "source_chapter": 1,
+                            "due_chapter": 5,
+                            "resolved_chapter": None,
+                            "reinforced_chapters": [chapter_number],
+                            "related_entities": ["林秋"],
+                            "keywords": ["旧钥匙"],
+                            "importance": 2,
+                        }
+                    ]
+                    if is_deep
+                    else []
+                ),
                 "style_notes": ["克制、悬疑"],
                 "suspense": ["门后是谁"],
+                "event_facts": [
+                    {
+                        "event_id": f"event:{chapter_number}:door",
+                        "description": "门后是谁",
+                        "related_entities": ["林秋"],
+                        "keywords": ["门后"],
+                        "importance": 3,
+                    }
+                ],
             }
         if tool_name == "record_range_summary":
             return {
@@ -235,6 +278,9 @@ auto_approve_outline = true
 auto_approve_chapter_plan = true
 auto_approve_scene_plan = true
 auto_approve_review_failure = false
+
+[writing]
+range_summary_chapter_span = 2
 
 [models.default]
 api = "responses"
@@ -488,6 +534,49 @@ async def test_pipeline_summary_aggregates_optional_usage_fields(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_generated_range_summary_receives_all_window_generated_chapters(
+    tmp_path: Path,
+) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config_with_planning_auto_approval(config)
+    llm = FakeToolLLM()
+
+    summary = await InklinkPipeline(llm=llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=2,
+            start_chapter=3,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+        )
+    )
+
+    assert summary.generated_chapters == [3, 4]
+    range_inputs = [
+        json.loads(input_text)
+        for task_type, tool_name, input_text in llm.inputs
+        if task_type == "range_summary" and tool_name == "record_range_summary"
+    ]
+    generated_window_inputs = [
+        payload
+        for payload in range_inputs
+        if payload["range"] == {"start_chapter": 3, "end_chapter": 4}
+    ]
+
+    assert generated_window_inputs
+    last_payload = generated_window_inputs[-1]
+    assert [chapter["number"] for chapter in last_payload["chapters"]] == [3, 4]
+    assert [analysis["chapter_number"] for analysis in last_payload["analyses"]] == [3, 4]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_pauses_at_outline_when_not_auto_approved(tmp_path: Path) -> None:
     novel = tmp_path / "novel"
     novel.mkdir()
@@ -571,6 +660,8 @@ async def test_pipeline_resumes_after_outline_approval(tmp_path: Path) -> None:
     assert resumed.status == "completed"
     assert resumed.generated_chapters == [3]
     assert ("outline_planning", "propose_outline") not in second_llm.calls
+    assert resumed.stats.total_calls == len(first_llm.calls) + len(second_llm.calls)
+    assert resumed.stats.total.calls == resumed.stats.total_calls
 
 
 @pytest.mark.asyncio
@@ -683,6 +774,13 @@ async def test_pipeline_updates_approval_artifact_with_chat(tmp_path: Path) -> N
         approval_id="outline",
     )
     service.close()
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(run.runtime_id)
+        service.record_approval_message(
+            approval_id="outline",
+            role="user",
+            content="第一轮：加强压迫感",
+        )
     llm = FakeToolLLM()
 
     second_version = await InklinkPipeline(llm=llm).update_artifact_with_chat(
@@ -698,6 +796,21 @@ async def test_pipeline_updates_approval_artifact_with_chat(tmp_path: Path) -> N
     assert first_version == 1
     assert second_version == 2
     assert ("outline_chat", "update_outline") in llm.calls
+    update_inputs = [
+        input_text
+        for task_type, tool_name, input_text in llm.inputs
+        if task_type == "outline_chat" and tool_name == "update_outline"
+    ]
+    assert "第一轮：加强压迫感" in update_inputs[0]
+    assert "强化冲突" in update_inputs[0]
+    with WorkflowService(log_root=log_root) as service:
+        service.inspect_run(run.runtime_id)
+        messages = service.list_messages("outline")
+        approval = service.get_artifact("outline", version=second_version)
+
+    assert messages[-1]["role"] == "assistant"
+    assert "强化冲突" in str(messages[-1]["content"])
+    assert approval["is_draft"] is True
 
 
 @pytest.mark.asyncio

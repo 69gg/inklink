@@ -38,7 +38,7 @@ load_project
 - `approve_scene_plan[*]`：逐章或逐场景批准场景计划。
 - 自审失败审批：当确定性检查或 LLM review 修订达到上限后，要求人工决定继续修订、放弃或接受风险。
 
-审批聊天每轮消息都参与幂等键，避免同一节点在审批上下文变化后复用旧结果。
+审批聊天每轮消息都会入库、参与幂等键，并在 `chat-update` 时作为完整会话历史交给对应 `update_*` 工具。AI 更新产物后会把 change summary 写回审批消息，避免后续轮次只看到最后一句用户意见。
 
 当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 首页可填写运行参数并启动或恢复 runtime；F1 展示文本 DAG 树和 runtime 状态；F4 屏幕可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节；F3 屏幕可输入 artifact ID 与两个版本号查看 JSON/unified diff。
 
@@ -72,7 +72,7 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 
 ## retry 与 rewrite_chapter
 
-`retry` 用于瞬时技术错误，例如网络超时、429、5xx、进程中断或可恢复的 SDK 异常。retry 不递增 generation，目标是重新执行同一个节点尝试。
+`retry` 用于瞬时技术错误，例如网络超时、429、5xx、进程中断或可恢复的 SDK 异常。retry 不递增 generation；当前实现会把已有目标节点标记为 `invalidated` 并记录 `node_retry_requested` 事件，使后续恢复流程不会把该节点视为有效完成态。创作性不满意应使用 `rewrite_chapter`，而不是 retry。
 
 `rewrite_chapter` 用于丢弃已有创作结果并重新生成。它必须递增 generation，并使旧 artifact、旧结构化索引贡献和下游依赖失效。
 
@@ -96,20 +96,21 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 当前 workflow service 和 pipeline 的边界如下：
 
 - `start_run()` 会读取章节、获取输入目录锁、创建 SQLite 状态库、写入 `run_started` JSONL 事件。
-- `retry_node()` 会记录 `node_retry_requested` 事件。
+- `retry_node()` 会记录 `node_retry_requested` 事件；如果节点存在，会把该节点标记为 `invalidated`。
 - `inspect_run()` 会只读打开 runtime，不获取项目锁、不修改 run 状态、不写 `run_resumed`，供 info/stats/list 类命令使用。
 - `resume_run()` 会重新打开 `logs/<runtime_id>/state.sqlite`，获取项目锁，并记录 `run_resumed`。
 - `abandon_chapter()` 会递增 generation、登记废弃 generation、失效相关 artifact/node，并记录 `chapter_abandon_requested` 事件。
 - `rewrite_chapter()` 会递增 generation、登记废弃 generation、失效相关 artifact/node，并记录 `chapter_rewrite_requested` 事件。
-- `record_approval_message()` 会写入审批聊天消息并更新消息 hash。
+- `record_approval_message()` 会写入审批聊天消息并更新消息 hash，且不会清空已有审批绑定的 artifact。
 - `approve_artifact()` 会批准指定 artifact 版本，并把 artifact 行从讨论稿转为已批准定稿。
-- `InklinkPipeline.update_artifact_with_chat()` 会通过 `update_outline`、`update_chapter_plan` 或 `update_scene_plan` 工具生成新的讨论稿 artifact 版本。
+- `InklinkPipeline.update_artifact_with_chat()` 会把完整审批会话历史传入 `update_outline`、`update_chapter_plan` 或 `update_scene_plan` 工具，生成新的讨论稿 artifact 版本，并记录 assistant change summary。
 - `usage_stats()` 会从持久化 LLM 调用记录聚合 profile/model/task 用量。
 - `WorkflowExecutor` 能按依赖运行节点、拒绝重复节点和循环依赖，并在 runner 失败时标记 failed。
 - `InklinkPipeline` 会执行当前端到端生成流：`chapter_extraction`、`range_summary`、`story_merge`、`outline_planning`、`chapter_planning`、`scene_planning`、`drafting`、`review`、`revision`、生成章节集成分析和输出写入。
 - 同章内场景按顺序生成，后续场景 prompt 包含前序场景正文。
 - 确定性检查覆盖章节字数、场景字数、场景总目标区间、必须人物/关键词和重复回收伏笔。伏笔检查会按 `thread_id` 对 `PlotThread` 去重，乱序输入下仍确定性检查已 resolved/abandoned 伏笔的重复回收，以及超过 `due_chapter` 且未终止的伏笔。
-- `output` 模式写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`；`writeback` 模式在目标文件已存在时写入 `pending_writeback` 并进入 `waiting_write_output`，目标释放后 resume 会原子落盘。
+- 运行中生成章节会反哺结构化索引，并刷新所在区间摘要；刷新时会把窗口内已存在的原章节和已生成章节一起交给 `summarize_range`，避免同一窗口的摘要只剩最后一章。
+- `output` 模式写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`；`writeback` 模式在目标文件已存在时写入 `pending_writeback` 并进入 `waiting_write_output`，目标释放后 resume 会通过目标目录内临时文件原子落盘。
 - `--resume-runtime-id` 会恢复同一 runtime，复用已成功 LLM tool result，并跳过已完成且输出文件仍存在的章节。
 - `inklink workflow ...` 子命令可对已有 runtime 执行 info、stats、nodes、artifacts、artifact、approvals、messages、events、message、chat-update、approve、retry、abandon 和 rewrite。查询类命令使用只读 inspect，不会把已完成 run 改回 running。
 - TUI 已提供参数化启动/恢复入口、runtime 状态汇总、文本 DAG 树、审批消息、AI 产物修改、artifact diff、批准、retry、abandon 和 rewrite 控件。

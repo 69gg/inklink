@@ -13,7 +13,13 @@ from pydantic import (
     model_validator,
 )
 
-from inklink.domain.models import PlotThreadStatus
+from inklink.domain.models import (
+    AnalysisCharacterFact,
+    AnalysisEventFact,
+    AnalysisPlotThreadFact,
+    AnalysisWorldRuleFact,
+    PlotThreadStatus,
+)
 
 type PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 type NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
@@ -384,42 +390,107 @@ def facts_from_chapter_analysis(
     worldbuilding: list[str],
     plot_threads: list[str],
     suspense: list[str],
+    character_facts: list[AnalysisCharacterFact] | None = None,
+    worldbuilding_facts: list[AnalysisWorldRuleFact] | None = None,
+    plot_thread_facts: list[AnalysisPlotThreadFact] | None = None,
+    event_facts: list[AnalysisEventFact] | None = None,
 ) -> list[StructuredFact]:
     facts: list[StructuredFact] = []
-    for offset, fact in enumerate(worldbuilding):
+    for character in character_facts or []:
+        facts.append(
+            StructuredFact(
+                fact_id=f"character:{chapter_number}:{character.entity_id}",
+                kind="keyword",
+                text=character.entity_id,
+                chapter_number=chapter_number,
+                generation=generation,
+                priority=3,
+                keywords=[character.entity_id, *character.aliases],
+                payload={
+                    "entity_id": character.entity_id,
+                    "aliases": character.aliases,
+                    "character_status": character.status,
+                    "traits": character.traits,
+                    "relationships": character.relationships,
+                },
+            )
+        )
+    for offset, world_text in enumerate(worldbuilding):
         facts.append(
             StructuredFact(
                 fact_id=f"worldbuilding:{chapter_number}:{offset}",
                 kind="worldbuilding",
-                text=fact,
+                text=world_text,
                 chapter_number=chapter_number,
                 generation=generation,
                 priority=4,
-                keywords=_keywords_from_text(fact),
+                keywords=_keywords_from_text(world_text),
                 payload={
-                    "description": fact,
+                    "description": world_text,
                     "source_chapter": chapter_number,
                     "importance": 4,
                 },
             )
         )
-    for offset, thread in enumerate(plot_threads):
+    for world_fact in worldbuilding_facts or []:
+        facts.append(
+            StructuredFact(
+                fact_id=world_fact.rule_id,
+                kind="worldbuilding",
+                text=world_fact.description,
+                chapter_number=chapter_number,
+                generation=generation,
+                priority=world_fact.importance,
+                keywords=world_fact.keywords,
+                payload={
+                    "description": world_fact.description,
+                    "source_chapter": chapter_number,
+                    "related_entities": world_fact.related_entities,
+                    "importance": world_fact.importance,
+                },
+            )
+        )
+    for offset, thread_text in enumerate(plot_threads):
         facts.append(
             StructuredFact(
                 fact_id=f"plot_thread:{chapter_number}:{offset}",
                 kind="plot_thread",
-                text=thread,
+                text=thread_text,
                 chapter_number=chapter_number,
                 generation=generation,
                 priority=2,
-                keywords=_keywords_from_text(thread),
+                keywords=_keywords_from_text(thread_text),
                 payload={
                     "thread_id": f"plot_thread:{chapter_number}:{offset}",
-                    "description": thread,
+                    "description": thread_text,
                     "status": PlotThreadStatus.SEEDED.value,
                     "source_chapter": chapter_number,
                     "reinforced_chapters": [],
                     "importance": 2,
+                },
+            )
+        )
+    for thread_fact in plot_thread_facts or []:
+        source_chapter = thread_fact.source_chapter or chapter_number
+        facts.append(
+            StructuredFact(
+                fact_id=thread_fact.thread_id,
+                kind="plot_thread",
+                text=thread_fact.description,
+                chapter_number=chapter_number,
+                generation=generation,
+                priority=thread_fact.importance,
+                keywords=thread_fact.keywords,
+                payload={
+                    "thread_id": thread_fact.thread_id,
+                    "description": thread_fact.description,
+                    "status": thread_fact.status.value,
+                    "source_chapter": source_chapter,
+                    "due_chapter": thread_fact.due_chapter,
+                    "resolved_chapter": thread_fact.resolved_chapter,
+                    "reinforced_chapters": thread_fact.reinforced_chapters,
+                    "related_entities": thread_fact.related_entities,
+                    "importance": thread_fact.importance,
                 },
             )
         )
@@ -437,6 +508,24 @@ def facts_from_chapter_analysis(
                     "description": suspense_item,
                     "source_chapter": chapter_number,
                     "importance": 3,
+                },
+            )
+        )
+    for event in event_facts or []:
+        facts.append(
+            StructuredFact(
+                fact_id=event.event_id,
+                kind="event",
+                text=event.description,
+                chapter_number=chapter_number,
+                generation=generation,
+                priority=event.importance,
+                keywords=event.keywords,
+                payload={
+                    "description": event.description,
+                    "source_chapter": chapter_number,
+                    "related_entities": event.related_entities,
+                    "importance": event.importance,
                 },
             )
         )

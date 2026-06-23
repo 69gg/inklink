@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +10,7 @@ from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-from inklink.atomic import atomic_write_text
+from inklink.atomic import atomic_move_text, atomic_write_text
 from inklink.chapters import Chapter, load_chapters
 from inklink.config import AppConfig, ModelProfile, load_config
 from inklink.domain.checks import run_chapter_checks
@@ -308,6 +307,7 @@ class InklinkPipeline:
                     role="user",
                     content=user_message,
                 )
+                messages = store.list_messages(approval_id)
                 tool_spec = _tool_spec_for_artifact_update(artifact_type)
                 updated = await self._call_model(
                     config=config,
@@ -324,6 +324,13 @@ class InklinkPipeline:
                         "artifact_type": artifact_type,
                         "current_artifact": latest["payload"],
                         "user_message": user_message,
+                        "conversation": [
+                            {
+                                "role": str(message["role"]),
+                                "content": str(message["content"]),
+                            }
+                            for message in messages
+                        ],
                     },
                 )
                 version = store.upsert_artifact(
@@ -334,6 +341,14 @@ class InklinkPipeline:
                     is_approved=False,
                     approval_id=approval_id,
                 )
+                store.create_or_update_approval(
+                    approval_id=approval_id,
+                    approval_type=artifact_type,
+                    status="waiting",
+                    auto_approve=False,
+                    artifact_id=artifact_id,
+                    artifact_version=version,
+                )
                 event_log.write(
                     "approval_artifact_updated",
                     {
@@ -343,6 +358,11 @@ class InklinkPipeline:
                         "artifact_type": artifact_type,
                         "version": version,
                     },
+                )
+                service.record_approval_message(
+                    approval_id=approval_id,
+                    role="assistant",
+                    content=_artifact_update_change_summary(updated),
                 )
                 return version
             finally:
@@ -943,6 +963,8 @@ class InklinkPipeline:
                         await self._summarize_generated_window(
                             draft=draft,
                             analysis=generated_analysis,
+                            analyses=analyses,
+                            chapters=chapters,
                             config=config,
                             runtime_id=run.runtime_id,
                             store=store,
@@ -994,7 +1016,7 @@ class InklinkPipeline:
                     log_dir=run.log_dir,
                     generated_chapters=generated_chapters,
                     output_files=output_files,
-                    stats=stats,
+                    stats=_run_stats_from_store(store) or stats,
                     status="completed",
                 )
                 _write_json(artifacts_dir / "run_summary.json", summary.model_dump(mode="json"))
@@ -1250,6 +1272,8 @@ class InklinkPipeline:
         *,
         draft: DraftChapter,
         analysis: ChapterAnalysis,
+        analyses: list[ChapterAnalysis],
+        chapters: list[Chapter],
         config: AppConfig,
         runtime_id: str,
         store: StateStore,
@@ -1274,6 +1298,17 @@ class InklinkPipeline:
                 }
             ),
         )
+        window_chapters = _window_chapter_payloads(
+            store=store,
+            chapters=chapters,
+            generated_draft=draft,
+            start=start,
+            end=end,
+        )
+        window_analyses = [item for item in analyses if start <= item.chapter_number <= end]
+        if not any(item.chapter_number == analysis.chapter_number for item in window_analyses):
+            window_analyses.append(analysis)
+        window_analyses.sort(key=lambda item: item.chapter_number)
         summary = await self._call_model(
             config=config,
             runtime_id=runtime_id,
@@ -1283,15 +1318,8 @@ class InklinkPipeline:
             task_type="range_summary",
             tool_spec=_TOOL_SPECS["record_range_summary"],
             input_payload={
-                "chapters": [
-                    {
-                        "number": draft.chapter_number,
-                        "title": draft.title,
-                        "body": draft.body,
-                        "source": "generated",
-                    }
-                ],
-                "analyses": [analysis.model_dump(mode="json")],
+                "chapters": window_chapters,
+                "analyses": [item.model_dump(mode="json") for item in window_analyses],
                 "range": {"start_chapter": start, "end_chapter": end},
             },
             generation=store.get_chapter_generation(draft.chapter_number),
@@ -1300,7 +1328,9 @@ class InklinkPipeline:
             **{
                 **summary.model_dump(mode="python"),
                 "start_chapter": start,
-                "end_chapter": max(summary.end_chapter, draft.chapter_number),
+                "end_chapter": max(
+                    [draft.chapter_number, *[item.chapter_number for item in window_analyses]]
+                ),
             }
         )
         version = store.upsert_artifact(
@@ -1849,6 +1879,36 @@ def _sum_usage_buckets(buckets: Iterable[UsageBucket]) -> UsageBucket:
     return total
 
 
+def _run_stats_from_store(store: StateStore) -> RunStats | None:
+    rows = store.usage_summary()
+    if not rows:
+        return None
+    stats = RunStats()
+    for row in rows:
+        usage = _normalized_usage_from_row(row.get("normalized_usage_json"))
+        if usage is None:
+            continue
+        stats.add(
+            ToolCallResult(
+                payload={},
+                usage=usage,
+                profile_name=str(row["profile"]),
+                model=str(row["model"]),
+                task_type=str(row["task_type"]),
+            )
+        )
+    return stats if stats.total_calls > 0 else None
+
+
+def _normalized_usage_from_row(value: object) -> NormalizedUsage | None:
+    if not isinstance(value, str):
+        return None
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        return None
+    return NormalizedUsage.model_validate(parsed)
+
+
 def _drop_legacy_optional_zero_usage(bucket: object) -> object:
     if not isinstance(bucket, dict):
         return bucket
@@ -2190,6 +2250,13 @@ def _chat_task_for_artifact(artifact_type: str) -> str:
     raise ValueError(f"artifact_type does not support chat updates: {artifact_type}")
 
 
+def _artifact_update_change_summary(updated: BaseModel) -> str:
+    value = getattr(updated, "change_summary", None)
+    if isinstance(value, str) and value.strip():
+        return value
+    return "已根据本轮审批聊天更新产物。"
+
+
 def _deep_analysis_start(chapters: list[Chapter], config: AppConfig) -> int:
     if not chapters:
         return 1
@@ -2218,6 +2285,10 @@ def _index_from_analyses(analyses: list[ChapterAnalysis]) -> StoryIndex:
 
 
 def _analysis_needs_deep_upgrade(analysis: ChapterAnalysis) -> bool:
+    if analysis.plot_threads and not analysis.plot_thread_facts:
+        return True
+    if analysis.plot_thread_facts:
+        return False
     if not analysis.plot_threads and not analysis.suspense:
         return False
     facts = _facts_from_analysis(analysis, generation=1)
@@ -2235,6 +2306,57 @@ def _analysis_needs_deep_upgrade(analysis: ChapterAnalysis) -> bool:
         if not (has_source and has_thread_id and has_status and has_resolution_window):
             return True
     return False
+
+
+def _window_chapter_payloads(
+    *,
+    store: StateStore,
+    chapters: list[Chapter],
+    generated_draft: DraftChapter,
+    start: int,
+    end: int,
+) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = [
+        _chapter_payload(chapter) for chapter in chapters if start <= chapter.number <= end
+    ]
+    if start <= generated_draft.chapter_number <= end:
+        payloads.append(
+            {
+                "number": generated_draft.chapter_number,
+                "title": generated_draft.title,
+                "body": generated_draft.body,
+                "source": "generated",
+            }
+        )
+    existing_numbers = {
+        number for payload in payloads if (number := _payload_number(payload)) is not None
+    }
+    for chapter_number in range(start, end + 1):
+        if chapter_number in existing_numbers:
+            continue
+        artifact = store.get_latest_artifact(f"chapter_draft:{chapter_number}")
+        if artifact is None:
+            continue
+        try:
+            draft = DraftChapter.model_validate(artifact["payload"])
+        except ValueError:
+            continue
+        payloads.append(
+            {
+                "number": draft.chapter_number,
+                "title": draft.title,
+                "body": draft.body,
+                "source": "generated",
+            }
+        )
+    return sorted(payloads, key=lambda item: _payload_number(item) or 0)
+
+
+def _payload_number(payload: dict[str, object]) -> int | None:
+    value = payload.get("number")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
 
 
 def _analysis_node_is_deep(store: StateStore, chapter_number: int) -> bool:
@@ -2299,6 +2421,10 @@ def _facts_from_analysis(
         worldbuilding=analysis.worldbuilding,
         plot_threads=analysis.plot_threads,
         suspense=analysis.suspense,
+        character_facts=analysis.character_facts,
+        worldbuilding_facts=analysis.worldbuilding_facts,
+        plot_thread_facts=analysis.plot_thread_facts,
+        event_facts=analysis.event_facts,
     )
 
 
@@ -2395,10 +2521,9 @@ def _write_chapter_output(
         source = pending_target if pending_target.exists() else None
         target.parent.mkdir(parents=True, exist_ok=True)
         if source is None:
-            tmp_target = run_log_dir / "outputs" / f"tmp_{draft.chapter_number}.txt"
-            atomic_write_text(tmp_target, content)
-            source = tmp_target
-        os.replace(source, target)
+            atomic_write_text(target, content)
+        else:
+            atomic_move_text(source, target)
         store.upsert_node(
             node_id=node_id,
             node_type="write_output",
@@ -2445,7 +2570,7 @@ def _resume_pending_write_output_summary(
     if not pending_file.is_file() or target.exists():
         return summary
     target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(pending_file, target)
+    atomic_move_text(pending_file, target)
     store.upsert_node(
         node_id=summary.waiting_node_id,
         node_type="write_output",

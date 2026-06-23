@@ -14,7 +14,7 @@
 - OpenAI Python SDK `AsyncOpenAI` 适配层，区分 Responses API 与 Chat Completions API。
 - 可执行端到端 pipeline：章节分析、cold-start shallow/deep 与按需 deep 升级、区间摘要、结构化检索原文片段、故事状态合并、大纲、章节计划、场景计划、场景顺序续写、确定性检查、LLM review、自动修订、输出写入和用量统计。
 - workflow primitive，包括 DAG 执行器、幂等键、run 启动、只读 inspect、resume、retry/rewrite/abandon、调用缓存、artifact 版本、审批消息和 generation 撤回。
-- 审批门：大纲、章节计划、场景计划和自审失败可暂停 run；`approve` 会把 artifact 版本标为定稿，resume 后继续。
+- 审批门：大纲、章节计划、场景计划和自审失败可暂停 run；审批聊天会把完整消息历史交给 AI 更新工具，`approve` 会把 artifact 版本标为定稿，resume 后继续。
 - 章节级放弃/重写会递增 generation、撤回旧 generation 的索引事实，并失效相关章节产物、run summary 和下游章节节点。
 - usage 统计会按总计、profile、model、task 汇总 LLM calls、input、output 和 total tokens；当服务端返回 cache 或 reasoning 细分时，CLI 只在有值时追加显示。
 
@@ -58,10 +58,11 @@ uv run inklink run ./novel --config config.toml
 
 ```bash
 uv run inklink run ./novel --config config.toml --execute \
-  --chapter-count 1 --min-chars 800 --max-chars 1800 --auto-approve
+  --chapter-count 1 --min-chars 800 --max-chars 1800 \
+  --max-revision-rounds 3 --auto-approve
 ```
 
-默认 `output` 模式会写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`。`--output-mode writeback` 会写回输入目录的目标章节号；若目标文件已存在，正文会先写入 `logs/<runtime_id>/outputs/pending_writeback/<N>.txt`，run 进入 `waiting_write_output`，用户处理目标文件后用同一 runtime resume 即可原子落盘。
+默认 `output` 模式会写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`。`--output-mode writeback` 会写回输入目录的目标章节号；若目标文件已存在，正文会先写入 `logs/<runtime_id>/outputs/pending_writeback/<N>.txt`，run 进入 `waiting_write_output`，用户处理目标文件后用同一 runtime resume 即可通过目标目录内临时文件原子落盘。
 
 从已有运行恢复：
 

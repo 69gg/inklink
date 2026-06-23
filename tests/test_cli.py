@@ -133,6 +133,8 @@ api_key_env = "MISSING_FAKE_KEY"
             "8",
             "--max-chars",
             "80",
+            "--max-revision-rounds",
+            "4",
             "--auto-approve",
             "--resume-runtime-id",
             "runtime",
@@ -147,6 +149,7 @@ api_key_env = "MISSING_FAKE_KEY"
     assert options.chapter_count == 1
     assert options.auto_approve is True
     assert options.runtime_id == "runtime"
+    assert options.max_revision_rounds == 4
     assert "usage_total" in result.output
     assert "usage_by_profile" in result.output
     assert "usage_by_model" in result.output

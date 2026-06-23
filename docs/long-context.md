@@ -33,7 +33,7 @@ Inklink 的长篇上下文设计以结构化索引为唯一事实来源。全书
 
 1000+ 章项目不能把全书所有实体都注入每次 prompt。设计目标是只注入活跃/相关实体；`inactive`、`dead`、`resolved` 等低优先级实体继续保存在 SQLite 中，按需检索。
 
-当前代码已实现人物提及事实、世界观/伏笔/事件类结构化事实、有效 generation 过滤、active score 重算、typed views 派生，并把底层事实持久化到 SQLite。pipeline 会通过 `facts_from_chapter_analysis()` 把 `worldbuilding`、`plot_threads`、`suspense` 写成带 payload 的结构化事实，供伏笔生命周期、世界观、事件和关键词视图重建使用。
+当前代码已实现人物提及事实、世界观/伏笔/事件类结构化事实、有效 generation 过滤、active score 重算、typed views 派生，并把底层事实持久化到 SQLite。pipeline 会通过 `facts_from_chapter_analysis()` 把 `worldbuilding`、`plot_threads`、`suspense` 以及 `character_facts`、`worldbuilding_facts`、`plot_thread_facts`、`event_facts` 写成带 payload 的结构化事实，供伏笔生命周期、世界观、事件和关键词视图重建使用。
 
 ## 检索预算
 
@@ -64,7 +64,7 @@ shallow 与 deep 的差异主要在叙事摘要丰富程度；结构化字段仍
 
 `summarize_range[*]` 用于把连续章节折叠成区间摘要。初次导入和运行中持续生成应共用同一套阈值逻辑，避免冷启动摘要与后续摘要语义不一致。
 
-区间摘要是结构化事实的自然语言投影，不是事实源。需要恢复精确信息时，应回到 SQLite 中的结构化事实和 artifact。
+区间摘要是结构化事实的自然语言投影，不是事实源。需要恢复精确信息时，应回到 SQLite 中的结构化事实和 artifact。运行中连续生成章节时，刷新区间摘要会纳入该窗口内已有输入章节、已生成章节和对应分析，避免同一窗口摘要被最后一个生成章节覆盖。
 
 已知限制：如果某个 generation 已经吸收到区间摘要后才被放弃，结构化事实可以撤回，但旧区间摘要文本不会自动遗忘该 generation 的内容。对应区间摘要应标记为过期并重生成；v1 不保证所有边界都会自动重写摘要。
 

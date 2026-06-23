@@ -494,7 +494,14 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
 
         abandon = service.abandon_chapter(2)
         rewrite = service.rewrite_chapter(2)
+        service._current_run().store.upsert_node(
+            node_id="draft-1",
+            node_type="draft_scene",
+            status="failed",
+        )
+
         retry = service.retry_node("draft-1")
+        retried_node = service._current_run().store.get_node("draft-1")
 
         assert abandon.accepted is True
         assert "accepted" in abandon.message
@@ -504,6 +511,8 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
         assert "generation=3" in rewrite.message
         assert retry.accepted is True
         assert "accepted" in retry.message
+        assert retried_node["status"] == "invalidated"
+        assert retried_node["error_summary"] == "manual retry requested"
         with pytest.raises(ValueError, match="chapter_number"):
             service.abandon_chapter(0)
         with pytest.raises(ValueError, match="chapter_number"):
@@ -534,7 +543,11 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
         "invalidated_artifacts": [],
         "invalidated_nodes": [],
     }
-    assert events[3]["payload"] == {"runtime_id": run.runtime_id, "node_id": "draft-1"}
+    assert events[3]["payload"] == {
+        "runtime_id": run.runtime_id,
+        "node_id": "draft-1",
+        "invalidated": True,
+    }
 
 
 def test_service_records_approval_messages_artifacts_and_stats(tmp_path: Path) -> None:

@@ -697,3 +697,76 @@ def test_facts_from_chapter_analysis_adds_compatible_typed_payloads() -> None:
     assert index.world_rules["worldbuilding:7:0"].source_chapter == 7
     assert index.plot_threads["plot_thread:7:0"].status == PlotThreadStatus.SEEDED
     assert index.events["event:7:0"].description == "门后的人没有影子"
+
+
+def test_facts_from_chapter_analysis_uses_rich_structured_fields() -> None:
+    from inklink.domain.models import (
+        AnalysisCharacterFact,
+        AnalysisEventFact,
+        AnalysisPlotThreadFact,
+        AnalysisWorldRuleFact,
+    )
+
+    facts = facts_from_chapter_analysis(
+        chapter_number=12,
+        generation=1,
+        worldbuilding=[],
+        plot_threads=[],
+        suspense=[],
+        character_facts=[
+            AnalysisCharacterFact(
+                entity_id="林秋",
+                aliases=["秋"],
+                status="active",
+                traits=["谨慎"],
+                relationships=["与青灯有感应"],
+            )
+        ],
+        worldbuilding_facts=[
+            AnalysisWorldRuleFact(
+                rule_id="world:lamp",
+                description="青灯只回应旧钥匙",
+                related_entities=["林秋"],
+                keywords=["青灯", "旧钥匙"],
+                importance=2,
+            )
+        ],
+        plot_thread_facts=[
+            AnalysisPlotThreadFact(
+                thread_id="thread:key-origin",
+                description="旧钥匙来历待揭开",
+                status=PlotThreadStatus.REINFORCED,
+                source_chapter=3,
+                due_chapter=15,
+                reinforced_chapters=[12],
+                related_entities=["林秋"],
+                keywords=["旧钥匙"],
+                importance=1,
+            )
+        ],
+        event_facts=[
+            AnalysisEventFact(
+                event_id="event:door",
+                description="门后的人没有影子",
+                related_entities=["林秋"],
+                keywords=["门后"],
+                importance=3,
+            )
+        ],
+    )
+    index = StoryIndex(
+        mentions=[EntityMention(entity_id="林秋", chapter_number=12, generation=1, strength=1)],
+        facts=facts,
+    )
+
+    character = index.characters["林秋"]
+    thread = index.plot_threads["thread:key-origin"]
+
+    assert character.aliases == ["秋"]
+    assert character.status == CharacterStatus.ACTIVE
+    assert index.world_rules["world:lamp"].source_chapter == 12
+    assert thread.status == PlotThreadStatus.REINFORCED
+    assert thread.source_chapter == 3
+    assert thread.resolution_window is not None
+    assert thread.resolution_window.end_chapter == 15
+    assert index.events["event:door"].related_entities == ["林秋"]

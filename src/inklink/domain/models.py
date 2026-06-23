@@ -60,16 +60,113 @@ class DraftChapter(BaseModel):
         return _validate_non_blank_string(value)
 
 
+class AnalysisCharacterFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
+    status: str = "unknown"
+    traits: list[str] = Field(default_factory=list)
+    relationships: list[str] = Field(default_factory=list)
+
+    @field_validator("entity_id", "status")
+    @classmethod
+    def validate_identity_text(cls, value: str) -> str:
+        return _validate_non_blank_string(value)
+
+    @field_validator("aliases", "traits", "relationships")
+    @classmethod
+    def validate_items(cls, values: list[str]) -> list[str]:
+        return _validate_non_blank_list(values)
+
+
+class AnalysisWorldRuleFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rule_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    related_entities: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    importance: int = Field(default=5, ge=1)
+
+    @field_validator("rule_id", "description")
+    @classmethod
+    def validate_identity_text(cls, value: str) -> str:
+        return _validate_non_blank_string(value)
+
+    @field_validator("related_entities", "keywords")
+    @classmethod
+    def validate_items(cls, values: list[str]) -> list[str]:
+        return _validate_non_blank_list(values)
+
+
+class AnalysisPlotThreadFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    thread_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    status: PlotThreadStatus = PlotThreadStatus.SEEDED
+    source_chapter: int | None = Field(default=None, strict=True, gt=0)
+    due_chapter: int | None = Field(default=None, strict=True, gt=0)
+    resolved_chapter: int | None = Field(default=None, strict=True, gt=0)
+    reinforced_chapters: list[int] = Field(default_factory=list)
+    related_entities: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    importance: int = Field(default=2, ge=1)
+
+    @field_validator("thread_id", "description")
+    @classmethod
+    def validate_identity_text(cls, value: str) -> str:
+        return _validate_non_blank_string(value)
+
+    @field_validator("reinforced_chapters")
+    @classmethod
+    def validate_reinforced_chapters(cls, values: list[int]) -> list[int]:
+        for value in values:
+            if value <= 0:
+                raise ValueError("reinforced_chapters must contain positive integers")
+        return sorted(set(values))
+
+    @field_validator("related_entities", "keywords")
+    @classmethod
+    def validate_items(cls, values: list[str]) -> list[str]:
+        return _validate_non_blank_list(values)
+
+
+class AnalysisEventFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    related_entities: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    importance: int = Field(default=3, ge=1)
+
+    @field_validator("event_id", "description")
+    @classmethod
+    def validate_identity_text(cls, value: str) -> str:
+        return _validate_non_blank_string(value)
+
+    @field_validator("related_entities", "keywords")
+    @classmethod
+    def validate_items(cls, values: list[str]) -> list[str]:
+        return _validate_non_blank_list(values)
+
+
 class ChapterAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     chapter_number: int = Field(strict=True, gt=0)
     summary: str = Field(min_length=1)
     characters: list[str] = Field(default_factory=list)
+    character_facts: list[AnalysisCharacterFact] = Field(default_factory=list)
     worldbuilding: list[str] = Field(default_factory=list)
+    worldbuilding_facts: list[AnalysisWorldRuleFact] = Field(default_factory=list)
     plot_threads: list[str] = Field(default_factory=list)
+    plot_thread_facts: list[AnalysisPlotThreadFact] = Field(default_factory=list)
     style_notes: list[str] = Field(default_factory=list)
     suspense: list[str] = Field(default_factory=list)
+    event_facts: list[AnalysisEventFact] = Field(default_factory=list)
 
     @field_validator("summary")
     @classmethod

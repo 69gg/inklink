@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from inklink.atomic import atomic_write_text
+from inklink.atomic import atomic_move_text, atomic_write_text
 
 
 def test_atomic_write_creates_target(tmp_path: Path) -> None:
@@ -54,3 +54,14 @@ def test_atomic_write_cleans_temp_file_when_permission_copy_fails(
 
     assert target.read_text(encoding="utf-8") == "old"
     assert list(tmp_path.glob(".7.txt.*.tmp")) == []
+
+
+def test_atomic_move_text_replaces_target_and_removes_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    target = tmp_path / "target.txt"
+    source.write_text("title: 三\r\n---\r\n正文", encoding="utf-8")
+
+    atomic_move_text(source, target)
+
+    assert not source.exists()
+    assert target.read_text(encoding="utf-8") == "title: 三\n---\n正文"
