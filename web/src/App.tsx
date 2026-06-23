@@ -50,6 +50,7 @@ const defaultForm: RunForm = {
 
 export default function App() {
   const [form, setForm] = useState<RunForm>(() => loadStoredForm());
+  const [activeRuntimeId, setActiveRuntimeId] = useState('');
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null);
   const [artifact, setArtifact] = useState<ArtifactPayload | null>(null);
   const [status, setStatus] = useState('未连接');
@@ -60,7 +61,7 @@ export default function App() {
   const [diffRight, setDiffRight] = useState('');
   const [diffText, setDiffText] = useState('');
 
-  const runtimeId = snapshot?.runtime_id ?? form.runtime_id.trim();
+  const runtimeId = activeRuntimeId;
   const waiting = snapshot?.waiting_approval ?? null;
   const waitingArtifactId = waiting?.artifact_id ?? '';
   const waitingArtifactVersion = waiting?.artifact_version ?? null;
@@ -72,7 +73,7 @@ export default function App() {
   const formErrors = useMemo(() => validateForm(form), [form]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(form));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...form, runtime_id: '' }));
   }, [form]);
 
   useEffect(() => {
@@ -103,10 +104,7 @@ export default function App() {
     if (!runtimeId) return;
     const next = await loadSnapshot(runtimeId, form.log_root);
     setSnapshot(next);
-    if (next.runtime_id && next.runtime_id !== form.runtime_id) {
-      setForm((current) => ({ ...current, runtime_id: next.runtime_id ?? current.runtime_id }));
-    }
-  }, [form.log_root, form.runtime_id, runtimeId]);
+  }, [form.log_root, runtimeId]);
 
   useEffect(() => {
     if (!runtimeId) return;
@@ -153,7 +151,11 @@ export default function App() {
       const next = await startRun(form);
       setSnapshot(next);
       setArtifact(null);
-      if (next.runtime_id) setForm((current) => ({ ...current, runtime_id: next.runtime_id ?? '' }));
+      setDiffText('');
+      if (next.runtime_id) {
+        setActiveRuntimeId(next.runtime_id);
+        setForm((current) => ({ ...current, runtime_id: next.runtime_id ?? '' }));
+      }
     });
   }
 
@@ -162,7 +164,22 @@ export default function App() {
       const next = await resumeRun(form);
       setSnapshot(next);
       setArtifact(null);
+      setDiffText('');
+      if (next.runtime_id) setActiveRuntimeId(next.runtime_id);
     });
+  }
+
+  function resetWorkspace() {
+    setActiveRuntimeId('');
+    setSnapshot(null);
+    setArtifact(null);
+    setMessage('');
+    setChapterAction('');
+    setDiffLeft('');
+    setDiffRight('');
+    setDiffText('');
+    setStatus('已清空工作台，填写或粘贴运行 ID 后可重新续接。');
+    setForm((current) => ({ ...current, runtime_id: '' }));
   }
 
   async function approveCurrent() {
@@ -301,7 +318,11 @@ export default function App() {
         </label>
         <label>
           运行 ID
-          <input value={form.runtime_id} onChange={(event) => update('runtime_id', event.target.value)} />
+          <input
+            value={form.runtime_id}
+            onChange={(event) => updateRuntimeId(event.target.value)}
+            placeholder="留空创建新运行；填写后点击续接"
+          />
         </label>
 
         <div className="segmented">
@@ -426,6 +447,9 @@ export default function App() {
             <RefreshCw size={16} /> 续接
           </button>
         </div>
+        <button type="button" className="secondary-action" onClick={resetWorkspace} disabled={busy}>
+          清空工作台
+        </button>
         {formErrors.length > 0 ? (
           <ul className="form-errors">
             {formErrors.map((error) => (
@@ -442,7 +466,7 @@ export default function App() {
             <p className="eyebrow">{snapshot?.status ?? '未开始'}</p>
             <h2>{snapshot?.latest_message ?? '等待启动运行'}</h2>
           </div>
-          <div className="runtime-chip">{runtimeId || '无运行 ID'}</div>
+          <div className="runtime-chip">{runtimeId || '未连接运行'}</div>
         </header>
 
         <section className="run-summary">
@@ -651,13 +675,24 @@ export default function App() {
   function update<K extends keyof RunForm>(key: K, value: RunForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
   }
+
+  function updateRuntimeId(value: string) {
+    setForm((current) => ({ ...current, runtime_id: value }));
+    if (activeRuntimeId && value.trim() !== activeRuntimeId) {
+      setActiveRuntimeId('');
+      setSnapshot(null);
+      setArtifact(null);
+      setDiffText('');
+      setStatus('运行 ID 已修改，点击续接后加载该运行。');
+    }
+  }
 }
 
 function loadStoredForm(): RunForm {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (!stored) return defaultForm;
   try {
-    return { ...defaultForm, ...(JSON.parse(stored) as Partial<RunForm>) };
+    return { ...defaultForm, ...(JSON.parse(stored) as Partial<RunForm>), runtime_id: '' };
   } catch {
     return defaultForm;
   }

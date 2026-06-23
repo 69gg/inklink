@@ -78,6 +78,7 @@ button:disabled {
 .panel-title,
 .button-row,
 .button-column button,
+.secondary-action,
 .wide-button,
 .artifact-row,
 .phase {
@@ -206,6 +207,7 @@ textarea:focus {
 
 .button-row button,
 .button-column button,
+.secondary-action,
 .wide-button {
   justify-content: center;
   gap: 8px;
@@ -221,6 +223,7 @@ textarea:focus {
 
 .button-row button:hover,
 .button-column button:hover,
+.secondary-action:hover,
 .wide-button:hover,
 .artifact-row:hover {
   transform: translateY(-1px);
@@ -236,6 +239,12 @@ textarea:focus {
   display: grid;
   grid-template-columns: 1fr;
   gap: 10px;
+}
+
+.secondary-action {
+  width: 100%;
+  color: #b9d8d3;
+  background: #1b2321;
 }
 
 .wide-button {

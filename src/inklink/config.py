@@ -8,7 +8,6 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ApiKind = Literal["responses", "chat_completions"]
-ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 
 
 class RuntimeConfig(BaseModel):
@@ -60,7 +59,7 @@ class ModelProfile(BaseModel):
     max_concurrency: int = Field(default=1, gt=0)
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
-    reasoning_effort: ReasoningEffort | None = None
+    reasoning_effort: str | None = None
     max_completion_tokens: int | None = Field(default=None, gt=0)
 
 

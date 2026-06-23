@@ -82,7 +82,7 @@ WebUI 首页和 CLI `inklink run --execute` 支持在每次续写任务开始时
 | `models.<profile>.base_url` | string 或空字符串 | `None` | 留空使用 OpenAI SDK 默认地址；OpenAI-compatible 服务可填写自定义 `/v1` base URL。 |
 | `models.<profile>.temperature` | float，`0..2`，或空字符串 | `None` | 非空时传给请求。 |
 | `models.<profile>.top_p` | float，`0..1`，或空字符串 | `None` | 非空时传给请求。 |
-| `models.<profile>.reasoning_effort` | `none/minimal/low/medium/high/xhigh` 或空字符串 | `None` | Responses 适配器会转换为 `reasoning={"effort": ...}`；Chat Completions 适配器使用 `reasoning_effort`。具体模型是否支持由服务端决定。 |
+| `models.<profile>.reasoning_effort` | string 或空字符串 | `None` | 留空不传；非空时原样传给服务端。Responses 适配器会转换为 `reasoning={"effort": value}`；Chat Completions 适配器使用 `reasoning_effort=value`。本工具不枚举限制该值，具体模型或兼容服务是否支持由服务端决定。 |
 | `models.<profile>.max_completion_tokens` | 正整数或空字符串 | `None` | Responses 适配器使用 `max_output_tokens`；Chat Completions 适配器使用 `max_completion_tokens`。 |
 | `models.<profile>.timeout_seconds` | 正数或空字符串 | `None` | 非空时作为 SDK client 的 `timeout`。 |
 | `models.<profile>.max_retries` | 非负整数 | `2` | SDK 请求失败后的最大重试次数。 |

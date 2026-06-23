@@ -253,19 +253,22 @@ def test_invalid_api_is_rejected() -> None:
         )
 
 
-def test_invalid_reasoning_effort_is_rejected() -> None:
-    with pytest.raises(ValidationError, match="hihg"):
-        AppConfig.model_validate(
-            {
-                "models": {
-                    "default": {
-                        "api": "responses",
-                        "model": "gpt-test",
-                        "reasoning_effort": "hihg",
-                    }
+def test_reasoning_effort_is_passed_through_without_enum_validation() -> None:
+    config = AppConfig.model_validate(
+        {
+            "models": {
+                "default": {
+                    "api": "responses",
+                    "model": "gpt-test",
+                    "reasoning_effort": "provider-custom-effort",
                 }
             }
-        )
+        }
+    )
+
+    assert request_options_for_profile(config.models["default"])["reasoning"] == {
+        "effort": "provider-custom-effort"
+    }
 
 
 def test_numeric_config_rejects_invalid_values() -> None:
