@@ -140,6 +140,37 @@ class FakeToolLLM(ToolLLM):
         raise AssertionError(f"unexpected tool: {tool_name}")
 
 
+class FailingReviewLLM(FakeToolLLM):
+    async def call_tool(
+        self,
+        *,
+        task_type: str,
+        profile_name: str,
+        tool_name: str,
+        instructions: str,
+        input_text: str,
+        schema: dict[str, object],
+    ) -> ToolCallResult:
+        if tool_name == "submit_chapter_review":
+            self.calls.append((task_type, tool_name))
+            return ToolCallResult(
+                payload={"passed": False, "issues": ["节奏太弱"], "resolved_thread_ids": []},
+                usage=NormalizedUsage(input_tokens=10, output_tokens=5, total_tokens=15),
+                request_id=f"req-{len(self.calls)}",
+                profile_name=profile_name,
+                model="fake-model",
+                task_type=task_type,
+            )
+        return await super().call_tool(
+            task_type=task_type,
+            profile_name=profile_name,
+            tool_name=tool_name,
+            instructions=instructions,
+            input_text=input_text,
+            schema=schema,
+        )
+
+
 def write_chapter(path: Path, title: str, body: str) -> None:
     path.write_text(f"title: {title}\n---\n{body}", encoding="utf-8")
 
@@ -147,6 +178,28 @@ def write_chapter(path: Path, title: str, body: str) -> None:
 def write_config(path: Path) -> None:
     path.write_text(
         """
+[models.default]
+api = "responses"
+model = "fake-model"
+api_key_env = "INKLINK_FAKE_KEY"
+
+[tasks]
+drafting = "default"
+review = "default"
+""",
+        encoding="utf-8",
+    )
+
+
+def write_config_with_planning_auto_approval(path: Path) -> None:
+    path.write_text(
+        """
+[approvals]
+auto_approve_outline = true
+auto_approve_chapter_plan = true
+auto_approve_scene_plan = true
+auto_approve_review_failure = false
+
 [models.default]
 api = "responses"
 model = "fake-model"
@@ -288,6 +341,92 @@ async def test_pipeline_generates_chapter_outputs_and_stats(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_pipeline_pauses_at_outline_when_not_auto_approved(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+    llm = FakeToolLLM()
+
+    summary = await InklinkPipeline(llm=llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=False,
+        )
+    )
+
+    assert summary.status == "waiting_approval"
+    assert summary.waiting_approval_id == "outline"
+    assert summary.generated_chapters == []
+    assert ("chapter_planning", "propose_chapter_plan") not in llm.calls
+    assert (
+        "waiting_approval"
+        in json.loads(
+            (summary.log_dir / "artifacts" / "run_summary.json").read_text(encoding="utf-8")
+        )["status"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_pipeline_resumes_after_outline_approval(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+    log_root = tmp_path / "logs"
+    first_llm = FakeToolLLM()
+
+    paused = await InklinkPipeline(llm=first_llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=log_root,
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=False,
+        )
+    )
+    from inklink.workflow.service import WorkflowService
+
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(paused.runtime_id)
+        service.approve_artifact(
+            approval_id="outline",
+            approval_type="outline",
+            artifact_id="outline",
+            artifact_version=1,
+        )
+
+    second_llm = FakeToolLLM()
+    resumed = await InklinkPipeline(llm=second_llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=log_root,
+            runtime_id=paused.runtime_id,
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+        )
+    )
+
+    assert resumed.status == "completed"
+    assert resumed.generated_chapters == [3]
+    assert ("outline_planning", "propose_outline") not in second_llm.calls
+
+
+@pytest.mark.asyncio
 async def test_pipeline_resume_reuses_successful_calls_and_completed_output(
     tmp_path: Path,
 ) -> None:
@@ -296,7 +435,7 @@ async def test_pipeline_resume_reuses_successful_calls_and_completed_output(
     write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
     write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
     config = tmp_path / "config.toml"
-    write_config(config)
+    write_config_with_planning_auto_approval(config)
     first_llm = FakeToolLLM()
 
     first = await InklinkPipeline(llm=first_llm).run(
@@ -329,6 +468,53 @@ async def test_pipeline_resume_reuses_successful_calls_and_completed_output(
     assert second.output_files == first.output_files
     assert second_llm.calls == []
     assert second.stats.total_calls == first.stats.total_calls
+
+
+@pytest.mark.asyncio
+async def test_pipeline_resume_after_rewrite_regenerates_chapter(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+    first_llm = FakeToolLLM()
+
+    first = await InklinkPipeline(llm=first_llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+        )
+    )
+    from inklink.workflow.service import WorkflowService
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        service.resume_run(first.runtime_id)
+        service.rewrite_chapter(3)
+
+    second_llm = FakeToolLLM(draft_body="林秋重新推门，青灯照见第二枚旧钥匙。")
+    second = await InklinkPipeline(llm=second_llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            runtime_id=first.runtime_id,
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+        )
+    )
+
+    assert second.runtime_id == first.runtime_id
+    assert second.generated_chapters == [3]
+    assert ("drafting", "submit_scene_draft") in second_llm.calls
+    assert "重新推门" in second.output_files[0].read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -391,6 +577,35 @@ async def test_pipeline_revises_when_deterministic_check_fails(tmp_path: Path) -
 
     assert ("revision", "submit_revision") in llm.calls
     assert "旧钥匙也随之发烫" in summary.output_files[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_pauses_when_review_failure_needs_approval(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config_with_planning_auto_approval(config)
+    llm = FailingReviewLLM()
+
+    summary = await InklinkPipeline(llm=llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            max_revision_rounds=0,
+            auto_approve=False,
+        )
+    )
+
+    assert summary.status == "waiting_approval"
+    assert summary.waiting_approval_id == "review_failure:3"
+    assert summary.output_files == []
+    assert not (summary.log_dir / "outputs" / "chapters" / "3.txt").exists()
 
 
 @pytest.mark.asyncio

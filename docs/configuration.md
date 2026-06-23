@@ -38,14 +38,14 @@ Inklink 从 `config.toml` 读取配置，示例见仓库根目录的 `config.tom
 
 ## approvals
 
-当前 CLI/TUI pipeline 支持运行时 `--auto-approve` / `Ctrl+R` 自动接受规划节点并记录审批事件到 SQLite 和 JSONL。以下配置字段已支持解析和校验；更细粒度的按审批类型自动批准、审批 UI 和审批聊天仍属于后续 workflow/TUI 集成目标。
+当前 CLI/TUI pipeline 支持运行时 `--auto-approve` / `Ctrl+R` 自动接受全部审批点；也支持按配置字段自动接受某类审批。未自动接受的大纲、章节计划、场景计划和自审失败会暂停 run，并等待 `workflow approve` 或 TUI F4 基础审批控件处理。
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `approvals.auto_approve_outline` | bool | `false` | 配置字段已支持；后续审批执行接入后用于自动批准大纲。 |
-| `approvals.auto_approve_chapter_plan` | bool | `false` | 配置字段已支持；后续审批执行接入后用于自动批准章节计划。 |
-| `approvals.auto_approve_scene_plan` | bool | `false` | 配置字段已支持；后续审批执行接入后用于自动批准场景计划。 |
-| `approvals.auto_approve_review_failure` | bool | `false` | 配置字段已支持，但谨慎开启：后续审批执行接入后，若确定性检查或自审修订达到上限仍未通过，自动批准可能让质量不足或不满足合同的章节进入输出流程。 |
+| `approvals.auto_approve_outline` | bool | `false` | 自动批准大纲 artifact。 |
+| `approvals.auto_approve_chapter_plan` | bool | `false` | 自动批准章节计划 artifact。 |
+| `approvals.auto_approve_scene_plan` | bool | `false` | 自动批准场景计划 artifact。 |
+| `approvals.auto_approve_review_failure` | bool | `false` | 谨慎开启：若确定性检查或自审修订达到上限仍未通过，自动批准会让质量不足或不满足合同的章节继续进入输出流程。 |
 
 ## cold_start
 

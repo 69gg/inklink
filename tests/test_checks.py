@@ -274,6 +274,25 @@ def test_chapter_check_fails_when_required_keyword_missing() -> None:
     assert any(issue.code == "required_keyword_missing" for issue in report.issues)
 
 
+def test_chapter_check_fails_when_forbidden_term_is_present() -> None:
+    contract = ChapterContract(
+        chapter_number=4,
+        title="第四章",
+        min_chars=1,
+        max_chars=20,
+        required_characters=[],
+        required_keywords=[],
+        scene_ids=["s1"],
+        forbidden=["直接揭晓真相"],
+    )
+    draft = DraftChapter(chapter_number=4, title="第四章", body="他直接揭晓真相。")
+
+    report = run_chapter_checks(contract=contract, draft=draft, plot_threads=[])
+
+    assert not report.passed
+    assert any(issue.code == "forbidden_term_present" for issue in report.issues)
+
+
 def test_chapter_check_fails_when_contract_and_draft_chapter_mismatch() -> None:
     contract = ChapterContract(
         chapter_number=5,
@@ -352,3 +371,32 @@ def test_abandoned_plot_thread_cannot_be_resolved_again() -> None:
 
     assert not report.passed
     assert any(issue.code == "plot_thread_repeated_resolution" for issue in report.issues)
+
+
+def test_overdue_plot_thread_produces_warning() -> None:
+    contract = ChapterContract(
+        chapter_number=12,
+        title="第十二章",
+        min_chars=1,
+        max_chars=100,
+        required_characters=[],
+        required_keywords=[],
+        scene_ids=["s1"],
+    )
+    draft = DraftChapter(chapter_number=12, title="第十二章", body="主角继续追查。")
+    thread = PlotThread(
+        thread_id="p3",
+        description="旧钥匙来历",
+        status=PlotThreadStatus.REINFORCED,
+        source_chapter=2,
+        due_chapter=10,
+        related_keywords=["旧钥匙"],
+    )
+
+    report = run_chapter_checks(contract=contract, draft=draft, plot_threads=[thread])
+
+    assert not report.passed
+    assert any(
+        issue.code == "plot_thread_overdue" and issue.severity == "warning"
+        for issue in report.issues
+    )

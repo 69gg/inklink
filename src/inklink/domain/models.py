@@ -326,7 +326,9 @@ CheckIssueCode = Literal[
     "scene_total_out_of_range",
     "required_character_missing",
     "required_keyword_missing",
+    "forbidden_term_present",
     "plot_thread_repeated_resolution",
+    "plot_thread_overdue",
 ]
 CheckSeverity = Literal["error", "warning"]
 

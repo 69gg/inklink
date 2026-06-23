@@ -188,6 +188,44 @@ def test_cli_workflow_commands_operate_existing_runtime(tmp_path: Path) -> None:
         ["workflow", "rewrite", run.runtime_id, "1", "--log-root", str(log_root)],
     )
     stats = runner.invoke(app, ["workflow", "stats", run.runtime_id, "--log-root", str(log_root)])
+    artifacts = runner.invoke(
+        app,
+        ["workflow", "artifacts", run.runtime_id, "--log-root", str(log_root)],
+    )
+    artifact = runner.invoke(
+        app,
+        [
+            "workflow",
+            "artifact",
+            run.runtime_id,
+            "outline",
+            "--version",
+            "1",
+            "--log-root",
+            str(log_root),
+        ],
+    )
+    approvals = runner.invoke(
+        app,
+        ["workflow", "approvals", run.runtime_id, "--log-root", str(log_root)],
+    )
+    messages = runner.invoke(
+        app,
+        [
+            "workflow",
+            "messages",
+            run.runtime_id,
+            "--approval-id",
+            "outline",
+            "--log-root",
+            str(log_root),
+        ],
+    )
+    nodes = runner.invoke(app, ["workflow", "nodes", run.runtime_id, "--log-root", str(log_root)])
+    events = runner.invoke(
+        app,
+        ["workflow", "events", run.runtime_id, "--limit", "2", "--log-root", str(log_root)],
+    )
 
     assert info.exit_code == 0
     assert str(novel.resolve()) in info.output
@@ -203,6 +241,18 @@ def test_cli_workflow_commands_operate_existing_runtime(tmp_path: Path) -> None:
     assert "generation=3" in rewrite.output
     assert stats.exit_code == 0
     assert "no usage rows" in stats.output
+    assert artifacts.exit_code == 0
+    assert '"artifact_id": "outline"' in artifacts.output
+    assert artifact.exit_code == 0
+    assert '"outline": "初稿"' in artifact.output
+    assert approvals.exit_code == 0
+    assert '"approval_id": "outline"' in approvals.output
+    assert messages.exit_code == 0
+    assert "请强化冲突" in messages.output
+    assert nodes.exit_code == 0
+    assert nodes.output.strip() == "[]"
+    assert events.exit_code == 0
+    assert "run_resumed" in events.output
 
 
 def test_cli_workflow_chat_update_invokes_runner(

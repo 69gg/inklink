@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Annotated
@@ -144,9 +145,9 @@ def workflow_info(
     runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
     log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
 ) -> None:
-    """Resume a runtime long enough to show basic state."""
+    """Show basic runtime state without mutating the run."""
     with WorkflowService(log_root=log_root) as service:
-        run_state = service.resume_run(runtime_id)
+        run_state = service.inspect_run(runtime_id)
         typer.echo(f"runtime_id: {run_state.runtime_id}")
         typer.echo(f"input_dir: {run_state.input_dir}")
         typer.echo(f"log_dir: {run_state.log_dir}")
@@ -160,7 +161,7 @@ def workflow_stats(
 ) -> None:
     """Show persisted usage stats for an existing runtime."""
     with WorkflowService(log_root=log_root) as service:
-        service.resume_run(runtime_id)
+        service.inspect_run(runtime_id)
         rows = service.usage_stats()
         if not rows:
             typer.echo("no usage rows")
@@ -170,6 +171,76 @@ def workflow_stats(
                 f"{row.profile}/{row.model}/{row.task_type}: calls={row.calls} "
                 f"input={row.input_tokens} output={row.output_tokens} total={row.total_tokens}"
             )
+
+
+@workflow_app.command("nodes")
+def workflow_nodes(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """List workflow nodes for an existing runtime."""
+    with WorkflowService(log_root=log_root) as service:
+        service.inspect_run(runtime_id)
+        _echo_json(service.list_nodes())
+
+
+@workflow_app.command("artifacts")
+def workflow_artifacts(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """List artifact versions for an existing runtime."""
+    with WorkflowService(log_root=log_root) as service:
+        service.inspect_run(runtime_id)
+        _echo_json(service.list_artifacts())
+
+
+@workflow_app.command("artifact")
+def workflow_artifact(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    artifact_id: Annotated[str, typer.Argument(help="Artifact ID.")],
+    version: Annotated[int | None, typer.Option(help="Artifact version.")] = None,
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Show one artifact payload."""
+    with WorkflowService(log_root=log_root) as service:
+        service.inspect_run(runtime_id)
+        _echo_json(service.get_artifact(artifact_id, version))
+
+
+@workflow_app.command("approvals")
+def workflow_approvals(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """List approvals for an existing runtime."""
+    with WorkflowService(log_root=log_root) as service:
+        service.inspect_run(runtime_id)
+        _echo_json(service.list_approvals())
+
+
+@workflow_app.command("messages")
+def workflow_messages(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    approval_id: Annotated[str | None, typer.Option(help="Filter by approval ID.")] = None,
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """List approval messages for an existing runtime."""
+    with WorkflowService(log_root=log_root) as service:
+        service.inspect_run(runtime_id)
+        _echo_json(service.list_messages(approval_id))
+
+
+@workflow_app.command("events")
+def workflow_events(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    limit: Annotated[int, typer.Option(help="Number of recent events.")] = 20,
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Show recent JSONL audit events."""
+    with WorkflowService(log_root=log_root) as service:
+        service.inspect_run(runtime_id)
+        _echo_json(service.recent_events(limit=limit))
 
 
 @workflow_app.command("message")
@@ -300,3 +371,7 @@ async def _chat_update_artifact(
         artifact_type=artifact_type,
         user_message=content,
     )
+
+
+def _echo_json(payload: object) -> None:
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))

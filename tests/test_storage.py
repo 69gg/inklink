@@ -63,6 +63,33 @@ CREATE TABLE messages (
 );
 """
 
+SCHEMA_V2_SQL = """
+PRAGMA user_version = 2;
+
+CREATE TABLE runs (
+  runtime_id TEXT PRIMARY KEY,
+  input_dir TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE artifacts (
+  artifact_id TEXT NOT NULL,
+  artifact_type TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  parent_version INTEGER,
+  payload_json TEXT NOT NULL,
+  is_draft INTEGER NOT NULL DEFAULT 0,
+  is_approved INTEGER NOT NULL DEFAULT 0,
+  approval_id TEXT,
+  source_node_id TEXT,
+  source_tool_call_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(artifact_id, version)
+);
+"""
+
 
 def test_state_store_creates_schema_tables(tmp_path: Path) -> None:
     db = tmp_path / "nested" / "state.sqlite"
@@ -113,6 +140,34 @@ def test_state_store_rejects_legacy_database_without_schema_version(tmp_path: Pa
 
     with pytest.raises(UnsupportedSchemaError, match="unsupported SQLite schema version 0"):
         StateStore.open(db)
+
+
+def test_state_store_migrates_schema_v2_to_current(tmp_path: Path) -> None:
+    db = tmp_path / "state.sqlite"
+    connection = sqlite3.connect(db)
+    try:
+        connection.executescript(SCHEMA_V2_SQL)
+        connection.commit()
+    finally:
+        connection.close()
+
+    with StateStore.open(db) as store:
+        version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"outline": "初稿"},
+            is_draft=True,
+        )
+        artifact = store.get_artifact_version("outline", version)
+
+    connection = sqlite3.connect(db)
+    try:
+        user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert user_version == SCHEMA_VERSION
+    assert artifact["is_invalidated"] is False
 
 
 def test_state_store_records_run_and_nodes(tmp_path: Path) -> None:
@@ -243,7 +298,82 @@ def test_state_store_artifacts_version_and_approval_messages(tmp_path: Path) -> 
         assert latest is not None
         assert latest["version"] == 2
         assert latest["payload"] == {"outline": "定稿"}
+        assert latest["is_invalidated"] is False
         assert before != after
+        artifacts = store.list_artifacts()
+        assert artifacts[-1]["artifact_id"] == "outline"
+        assert artifacts[-1]["is_approved"] is True
+        assert store.get_artifact_version("outline", 1)["payload"] == {"outline": "初稿"}
+        assert store.list_approvals()[0]["approval_id"] == "outline"
+        assert store.list_messages("outline")[0]["content"] == "改得更紧凑"
+
+
+def test_state_store_approves_artifact_version(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"outline": "讨论稿"},
+            is_draft=True,
+        )
+
+        store.approve_artifact_version("outline", version)
+
+        artifact = store.get_artifact_version("outline", version)
+        assert artifact["is_draft"] is False
+        assert artifact["is_approved"] is True
+
+
+def test_state_store_invalidates_chapter_artifacts_and_nodes(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        store.upsert_node(node_id="chapter-3", node_type="chapter_generation", status="completed")
+        store.upsert_node(node_id="chapter-4", node_type="chapter_generation", status="completed")
+        store.upsert_node(node_id="chapter-2", node_type="chapter_generation", status="completed")
+        store.upsert_artifact(
+            artifact_id="scene_plan:3",
+            artifact_type="scene_plan",
+            payload={"chapter_number": 3, "scenes": []},
+            is_approved=True,
+        )
+        store.upsert_artifact(
+            artifact_id="chapter_draft:4",
+            artifact_type="chapter_draft",
+            payload={"chapter_number": 4},
+            is_approved=True,
+        )
+        store.upsert_artifact(
+            artifact_id="chapter_draft:2",
+            artifact_type="chapter_draft",
+            payload={"chapter_number": 2},
+            is_approved=True,
+        )
+
+        invalidated_artifacts = store.invalidate_artifacts_from_chapter(3)
+        invalidated_nodes = store.invalidate_nodes_from_chapter(3)
+
+        assert invalidated_artifacts == ["chapter_draft:4", "scene_plan:3"]
+        assert invalidated_nodes == ["chapter-3", "chapter-4"]
+        assert store.get_latest_artifact("scene_plan:3") is None
+        assert store.get_artifact_version("scene_plan:3", 1)["is_invalidated"] is True
+        assert store.get_artifact_version("chapter_draft:2", 1)["is_invalidated"] is False
+        assert store.get_node("chapter-3")["status"] == "invalidated"
+        assert store.get_node("chapter-2")["status"] == "completed"
+
+
+def test_state_store_approval_messages_hash_preserves_insertion_order(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        store.create_or_update_approval(
+            approval_id="outline",
+            approval_type="outline",
+            status="waiting",
+            auto_approve=False,
+        )
+        store.add_message(message_id="z-message", approval_id="outline", role="user", content="A")
+        store.add_message(message_id="a-message", approval_id="outline", role="user", content="B")
+
+        messages = store.list_messages("outline")
+
+        assert [message["content"] for message in messages] == ["A", "B"]
 
 
 def test_state_store_generation_abandon_rebuilds_story_index(tmp_path: Path) -> None:

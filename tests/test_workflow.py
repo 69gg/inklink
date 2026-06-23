@@ -480,9 +480,20 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
 
     with WorkflowService(log_root=tmp_path / "logs") as service:
         run = service.start_run(project)
+        service._current_run().store.upsert_node(
+            node_id="chapter-2",
+            node_type="chapter_generation",
+            status="completed",
+        )
+        service._current_run().store.upsert_artifact(
+            artifact_id="chapter_draft:2",
+            artifact_type="chapter_draft",
+            payload={"chapter_number": 2},
+            is_approved=True,
+        )
 
-        abandon = service.abandon_chapter(1)
-        rewrite = service.rewrite_chapter(1)
+        abandon = service.abandon_chapter(2)
+        rewrite = service.rewrite_chapter(2)
         retry = service.retry_node("draft-1")
 
         assert abandon.accepted is True
@@ -511,13 +522,17 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
     ]
     assert events[1]["payload"] == {
         "runtime_id": run.runtime_id,
-        "chapter_number": 1,
+        "chapter_number": 2,
         "next_generation": 2,
+        "invalidated_artifacts": ["chapter_draft:2"],
+        "invalidated_nodes": ["chapter-2"],
     }
     assert events[2]["payload"] == {
         "runtime_id": run.runtime_id,
-        "chapter_number": 1,
+        "chapter_number": 2,
         "next_generation": 3,
+        "invalidated_artifacts": [],
+        "invalidated_nodes": [],
     }
     assert events[3]["payload"] == {"runtime_id": run.runtime_id, "node_id": "draft-1"}
 
@@ -563,10 +578,24 @@ def test_service_records_approval_messages_artifacts_and_stats(tmp_path: Path) -
             usage=NormalizedUsage(input_tokens=2, output_tokens=3, total_tokens=5),
         )
         stats = service.usage_stats()
+        nodes = service.list_nodes()
+        artifacts = service.list_artifacts()
+        artifact = service.get_artifact("outline", version)
+        approvals = service.list_approvals()
+        messages = service.list_messages("outline")
+        events = service.recent_events(limit=3)
 
         assert version == 1
         assert message.accepted is True
         assert approved.message == "approved outline@1"
+        assert nodes == []
+        assert artifacts[0]["artifact_id"] == "outline"
+        assert artifact["payload"] == {"outline": "初稿"}
+        assert artifact["is_approved"] is True
+        assert artifact["is_draft"] is False
+        assert approvals[0]["approval_id"] == "outline"
+        assert messages[0]["content"] == "请强化冲突"
+        assert events
         assert stats == [
             UsageStatRow(
                 profile="default",
@@ -585,7 +614,7 @@ def test_service_records_approval_messages_artifacts_and_stats(tmp_path: Path) -
     assert "approval_accepted" in [event["event_type"] for event in events]
 
 
-def test_service_chapter_commands_reject_out_of_range_without_events(tmp_path: Path) -> None:
+def test_service_chapter_commands_allow_generated_chapter_numbers(tmp_path: Path) -> None:
     project = tmp_path / "novel"
     project.mkdir()
     write_workflow_chapter(project / "1.txt")
@@ -593,10 +622,40 @@ def test_service_chapter_commands_reject_out_of_range_without_events(tmp_path: P
     with WorkflowService(log_root=tmp_path / "logs") as service:
         run = service.start_run(project)
 
-        with pytest.raises(ValueError, match="chapter_number.*1"):
-            service.abandon_chapter(999)
-        with pytest.raises(ValueError, match="chapter_number.*1"):
-            service.rewrite_chapter(999)
+        abandon = service.abandon_chapter(999)
+        rewrite = service.rewrite_chapter(999)
+
+        assert "chapter 999" in abandon.message
+        assert "generation=2" in abandon.message
+        assert "chapter 999" in rewrite.message
+        assert "generation=3" in rewrite.message
+
+    events = read_workflow_events(run.log_dir / "events.jsonl")
+    assert [event["event_type"] for event in events] == [
+        "run_started",
+        "chapter_abandon_requested",
+        "chapter_rewrite_requested",
+    ]
+
+
+def test_service_inspect_run_does_not_mutate_completed_status_or_log_resume(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+    log_root = tmp_path / "logs"
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(project)
+        service._current_run().store.update_run_status(run.runtime_id, "completed")
+
+    with WorkflowService(log_root=log_root) as service:
+        inspected = service.inspect_run(run.runtime_id)
+        run_row = service._current_run().store.get_run(run.runtime_id)
+
+        assert inspected.runtime_id == run.runtime_id
+        assert run_row["status"] == "completed"
 
     events = read_workflow_events(run.log_dir / "events.jsonl")
     assert [event["event_type"] for event in events] == ["run_started"]

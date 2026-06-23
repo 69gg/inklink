@@ -6,7 +6,14 @@ from textual.binding import Binding
 from textual.widgets import Footer, Header
 
 from inklink.config import load_config
-from inklink.tui.screens import DashboardScreen, SetupWorkspace, StatsScreen
+from inklink.tui.screens import (
+    DashboardScreen,
+    RuntimeApprovalsScreen,
+    RuntimeArtifactsScreen,
+    RuntimeLogScreen,
+    SetupWorkspace,
+    StatsScreen,
+)
 from inklink.workflow.pipeline import GenerationOptions, InklinkPipeline, OpenAIToolLLM
 
 
@@ -17,6 +24,9 @@ class InklinkApp(App[None]):
     BINDINGS = [
         Binding("f1", "show_dashboard", "工作台"),
         Binding("f2", "show_stats", "统计"),
+        Binding("f3", "show_artifacts", "产物"),
+        Binding("f4", "show_approvals", "审批"),
+        Binding("f5", "show_events", "日志"),
         Binding("ctrl+r", "run_pipeline", "开始续写"),
     ]
 
@@ -33,11 +43,29 @@ class InklinkApp(App[None]):
 
     def action_show_dashboard(self) -> None:
         if not isinstance(self.screen, DashboardScreen):
-            self.push_screen(DashboardScreen(input_dir=self.input_dir, config=self.config))
+            self.push_screen(
+                DashboardScreen(
+                    input_dir=self.input_dir,
+                    config=self.config,
+                    runtime_id=self.latest_runtime_id,
+                )
+            )
 
     def action_show_stats(self) -> None:
         if not isinstance(self.screen, StatsScreen):
             self.push_screen(StatsScreen(runtime_id=self.latest_runtime_id))
+
+    def action_show_artifacts(self) -> None:
+        if not isinstance(self.screen, RuntimeArtifactsScreen):
+            self.push_screen(RuntimeArtifactsScreen(runtime_id=self.latest_runtime_id))
+
+    def action_show_approvals(self) -> None:
+        if not isinstance(self.screen, RuntimeApprovalsScreen):
+            self.push_screen(RuntimeApprovalsScreen(runtime_id=self.latest_runtime_id))
+
+    def action_show_events(self) -> None:
+        if not isinstance(self.screen, RuntimeLogScreen):
+            self.push_screen(RuntimeLogScreen(runtime_id=self.latest_runtime_id))
 
     async def action_run_pipeline(self) -> None:
         setup = self.query_one(SetupWorkspace)

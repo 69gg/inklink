@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 from types import TracebackType
@@ -36,8 +37,10 @@ class StateStore:
                     "or run a future migration before opening it"
                 )
                 raise UnsupportedSchemaError(message)
-            if version != 0 and version != SCHEMA_VERSION:
+            if version > SCHEMA_VERSION:
                 raise UnsupportedSchemaError(f"unsupported SQLite schema version {version}")
+            if version not in {0, SCHEMA_VERSION}:
+                _migrate_schema(connection, version)
             connection.executescript(SCHEMA_SQL)
             if version == 0:
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -189,6 +192,24 @@ class StateStore:
         if row is None:
             raise KeyError(node_id)
         return _row_to_dict(row)
+
+    def list_nodes(self) -> list[dict[str, object]]:
+        rows = self._connection.execute(
+            """
+            SELECT
+              node_id,
+              node_type,
+              status,
+              attempt,
+              idempotency_key,
+              input_version,
+              output_version,
+              error_summary
+            FROM nodes
+            ORDER BY node_id
+            """
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
 
     def get_successful_tool_payload(
         self,
@@ -364,8 +385,7 @@ class StateStore:
         source_node_id: str | None = None,
         source_tool_call_id: int | None = None,
     ) -> int:
-        latest = self.get_latest_artifact(artifact_id)
-        parent_version = None if latest is None else cast(int, latest["version"])
+        parent_version = self._latest_artifact_version(artifact_id)
         version = 1 if parent_version is None else parent_version + 1
         self._connection.execute(
             """
@@ -377,11 +397,12 @@ class StateStore:
               payload_json,
               is_draft,
               is_approved,
+              is_invalidated,
               approval_id,
               source_node_id,
               source_tool_call_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 artifact_id,
@@ -399,6 +420,24 @@ class StateStore:
         self._connection.commit()
         return version
 
+    def _latest_artifact_version(self, artifact_id: str) -> int | None:
+        row = cast(
+            sqlite3.Row | None,
+            self._connection.execute(
+                """
+                SELECT version
+                FROM artifacts
+                WHERE artifact_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (artifact_id,),
+            ).fetchone(),
+        )
+        if row is None:
+            return None
+        return cast(int, row["version"])
+
     def get_latest_artifact(
         self,
         artifact_id: str,
@@ -414,6 +453,7 @@ class StateStore:
               payload_json,
               is_draft,
               is_approved,
+              is_invalidated,
               approval_id,
               source_node_id,
               source_tool_call_id
@@ -423,6 +463,7 @@ class StateStore:
         parameters: tuple[object, ...] = (artifact_id,)
         if approved_only:
             sql += " AND is_approved = 1"
+        sql += " AND is_invalidated = 0"
         sql += " ORDER BY version DESC LIMIT 1"
         row = cast(sqlite3.Row | None, self._connection.execute(sql, parameters).fetchone())
         if row is None:
@@ -433,7 +474,145 @@ class StateStore:
         del result["payload_json"]
         result["is_draft"] = bool(result["is_draft"])
         result["is_approved"] = bool(result["is_approved"])
+        result["is_invalidated"] = bool(result["is_invalidated"])
         return result
+
+    def list_artifacts(self) -> list[dict[str, object]]:
+        rows = self._connection.execute(
+            """
+            SELECT
+              artifact_id,
+              artifact_type,
+              version,
+              parent_version,
+              is_draft,
+              is_approved,
+              is_invalidated,
+              approval_id,
+              source_node_id,
+              source_tool_call_id,
+              created_at
+            FROM artifacts
+            ORDER BY artifact_id, version
+            """
+        ).fetchall()
+        results: list[dict[str, object]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            item["is_draft"] = bool(item["is_draft"])
+            item["is_approved"] = bool(item["is_approved"])
+            item["is_invalidated"] = bool(item["is_invalidated"])
+            results.append(item)
+        return results
+
+    def get_artifact_version(self, artifact_id: str, version: int) -> dict[str, object]:
+        row = cast(
+            sqlite3.Row | None,
+            self._connection.execute(
+                """
+                SELECT
+                  artifact_id,
+                  artifact_type,
+                  version,
+                  parent_version,
+                  payload_json,
+                  is_draft,
+                  is_approved,
+                  is_invalidated,
+                  approval_id,
+                  source_node_id,
+                  source_tool_call_id,
+                  created_at
+                FROM artifacts
+                WHERE artifact_id = ? AND version = ?
+                """,
+                (artifact_id, version),
+            ).fetchone(),
+        )
+        if row is None:
+            raise KeyError(f"{artifact_id}@{version}")
+        result = _row_to_dict(row)
+        result["payload"] = json.loads(cast(str, result["payload_json"]))
+        del result["payload_json"]
+        result["is_draft"] = bool(result["is_draft"])
+        result["is_approved"] = bool(result["is_approved"])
+        result["is_invalidated"] = bool(result["is_invalidated"])
+        return result
+
+    def approve_artifact_version(self, artifact_id: str, version: int) -> None:
+        artifact = self.get_artifact_version(artifact_id, version)
+        if artifact["is_invalidated"]:
+            raise ValueError(f"cannot approve invalidated artifact: {artifact_id}@{version}")
+        self._connection.execute(
+            """
+            UPDATE artifacts
+            SET is_draft = 0, is_approved = 1
+            WHERE artifact_id = ? AND version = ?
+            """,
+            (artifact_id, version),
+        )
+        self._connection.commit()
+
+    def invalidate_artifacts_from_chapter(self, chapter_number: int) -> list[str]:
+        if chapter_number <= 0:
+            raise ValueError("chapter_number must be positive")
+        rows = self._connection.execute(
+            """
+            SELECT DISTINCT artifact_id
+            FROM artifacts
+            WHERE is_invalidated = 0
+            ORDER BY artifact_id
+            """
+        ).fetchall()
+        artifact_ids = [
+            str(row["artifact_id"])
+            for row in rows
+            if _artifact_depends_on_chapter(str(row["artifact_id"]), chapter_number)
+        ]
+        if artifact_ids:
+            placeholders = ",".join("?" for _ in artifact_ids)
+            self._connection.execute(
+                f"""
+                UPDATE artifacts
+                SET is_invalidated = 1, is_approved = 0
+                WHERE artifact_id IN ({placeholders})
+                """,
+                tuple(artifact_ids),
+            )
+            self._connection.commit()
+        return artifact_ids
+
+    def invalidate_nodes_from_chapter(self, chapter_number: int) -> list[str]:
+        if chapter_number <= 0:
+            raise ValueError("chapter_number must be positive")
+        rows = self._connection.execute(
+            """
+            SELECT node_id
+            FROM nodes
+            WHERE status != 'invalidated'
+            ORDER BY node_id
+            """
+        ).fetchall()
+        node_ids = [
+            str(row["node_id"])
+            for row in rows
+            if _node_depends_on_chapter(str(row["node_id"]), chapter_number)
+        ]
+        for node_id in node_ids:
+            self._connection.execute(
+                """
+                UPDATE nodes
+                SET
+                  status = 'invalidated',
+                  error_summary = ?,
+                  finished_at = CURRENT_TIMESTAMP
+                WHERE node_id = ?
+                """,
+                (f"invalidated by chapter {chapter_number} generation change", node_id),
+            )
+        if node_ids:
+            self._connection.commit()
+        return node_ids
 
     def create_or_update_approval(
         self,
@@ -475,6 +654,55 @@ class StateStore:
         )
         self._connection.commit()
 
+    def list_approvals(self) -> list[dict[str, object]]:
+        rows = self._connection.execute(
+            """
+            SELECT
+              approval_id,
+              approval_type,
+              artifact_id,
+              artifact_version,
+              status,
+              auto_approve,
+              created_at,
+              updated_at
+            FROM approvals
+            ORDER BY approval_id
+            """
+        ).fetchall()
+        results: list[dict[str, object]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            item["auto_approve"] = bool(item["auto_approve"])
+            results.append(item)
+        return results
+
+    def get_approval(self, approval_id: str) -> dict[str, object] | None:
+        row = cast(
+            sqlite3.Row | None,
+            self._connection.execute(
+                """
+                SELECT
+                  approval_id,
+                  approval_type,
+                  artifact_id,
+                  artifact_version,
+                  status,
+                  auto_approve,
+                  created_at,
+                  updated_at
+                FROM approvals
+                WHERE approval_id = ?
+                """,
+                (approval_id,),
+            ).fetchone(),
+        )
+        if row is None:
+            return None
+        item = _row_to_dict(row)
+        item["auto_approve"] = bool(item["auto_approve"])
+        return item
+
     def add_message(
         self,
         *,
@@ -492,13 +720,34 @@ class StateStore:
         )
         self._connection.commit()
 
+    def list_messages(self, approval_id: str | None = None) -> list[dict[str, object]]:
+        if approval_id is None:
+            rows = self._connection.execute(
+                """
+                SELECT message_id, approval_id, role, content, content_hash, created_at
+                FROM messages
+                ORDER BY rowid
+                """
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                """
+                SELECT message_id, approval_id, role, content, content_hash, created_at
+                FROM messages
+                WHERE approval_id = ?
+                ORDER BY rowid
+                """,
+                (approval_id,),
+            ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
     def approval_messages_hash(self, approval_id: str) -> str:
         rows = self._connection.execute(
             """
             SELECT role, content_hash
             FROM messages
             WHERE approval_id = ?
-            ORDER BY created_at, message_id
+            ORDER BY rowid
             """,
             (approval_id,),
         ).fetchall()
@@ -694,6 +943,21 @@ def _hash_json(payload: object) -> str:
     ).hexdigest()
 
 
+def _migrate_schema(connection: sqlite3.Connection, version: int) -> None:
+    if version == 2:
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(artifacts)").fetchall()
+        }
+        if "is_invalidated" not in columns:
+            connection.execute(
+                "ALTER TABLE artifacts ADD COLUMN is_invalidated INTEGER NOT NULL DEFAULT 0"
+            )
+        connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        connection.commit()
+        return
+    raise UnsupportedSchemaError(f"unsupported SQLite schema version {version}")
+
+
 def _schema_version(connection: sqlite3.Connection) -> int:
     return cast(int, connection.execute("PRAGMA user_version").fetchone()[0])
 
@@ -703,3 +967,48 @@ def _has_existing_tables(connection: sqlite3.Connection) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
     ).fetchone()
     return row is not None
+
+
+def _artifact_depends_on_chapter(artifact_id: str, chapter_number: int) -> bool:
+    if artifact_id in {"run_summary", "story_index", "story_state"}:
+        return True
+    if artifact_id.startswith("range_summary:"):
+        return True
+    for prefix in (
+        "scene_plan:",
+        "scene_draft:",
+        "chapter_draft:",
+        "chapter_analysis:",
+    ):
+        if artifact_id.startswith(prefix):
+            parsed = _parse_chapter_number_after_prefix(artifact_id, prefix)
+            return parsed is not None and parsed >= chapter_number
+    return False
+
+
+def _node_depends_on_chapter(node_id: str, chapter_number: int) -> bool:
+    match = re.fullmatch(r"chapter-(\d+)", node_id)
+    if match is not None:
+        return int(match.group(1)) >= chapter_number
+    for prefix in (
+        "plan_scenes:",
+        "draft_scene:",
+        "assemble_chapter:",
+        "check_chapter:",
+        "review_chapter:",
+        "revise_chapter:",
+        "integrate_generated_chapter:",
+        "write_output:",
+    ):
+        if node_id.startswith(prefix):
+            parsed = _parse_chapter_number_after_prefix(node_id, prefix)
+            return parsed is not None and parsed >= chapter_number
+    return False
+
+
+def _parse_chapter_number_after_prefix(value: str, prefix: str) -> int | None:
+    suffix = value.removeprefix(prefix)
+    token = suffix.split(":", maxsplit=1)[0]
+    if not token.isascii() or not token.isdecimal():
+        return None
+    return int(token)

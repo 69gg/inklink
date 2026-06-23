@@ -34,10 +34,18 @@ uv run inklink run ./novel --config config.toml --execute \
 ```bash
 uv run inklink workflow info <runtime_id>
 uv run inklink workflow stats <runtime_id>
+uv run inklink workflow nodes <runtime_id>
+uv run inklink workflow artifacts <runtime_id>
+uv run inklink workflow approvals <runtime_id>
+uv run inklink workflow events <runtime_id>
 uv run inklink workflow message <runtime_id> outline "请强化冲突"
 uv run inklink workflow chat-update <runtime_id> outline outline outline "请强化冲突"
 uv run inklink workflow approve <runtime_id> outline outline 1
+uv run inklink workflow abandon <runtime_id> 3
+uv run inklink workflow rewrite <runtime_id> 3
 ```
+
+`info/stats/nodes/artifacts/artifact/approvals/messages/events` 使用只读 inspect，不会修改 run 状态，也不会写 `run_resumed` 事件。`message/chat-update/approve/retry/abandon/rewrite` 是写命令，会获取输入目录锁。
 
 ## 验证命令
 
@@ -71,7 +79,7 @@ uv run pytest tests/test_config.py -q
 | `src/inklink/llm/*` | provider-independent 类型、OpenAI Responses/Chat 适配器、usage 归一化、profile 限流。 |
 | `src/inklink/tools/registry.py` | 内部 function tool schema 与 dispatch 注册。 |
 | `src/inklink/workflow/*` | DAG 节点模型、幂等键、执行器、workflow service 和端到端 pipeline。 |
-| `src/inklink/tui/*` | Textual TUI shell 和屏幕。 |
+| `src/inklink/tui/*` | Textual TUI、运行摘要、产物/审批/事件审计屏和基础审批控件。 |
 | `tests/*` | 与上述模块对应的 focused tests。 |
 
 ## 代码约定

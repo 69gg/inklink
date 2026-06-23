@@ -40,7 +40,7 @@ load_project
 
 审批聊天每轮消息都参与幂等键，避免同一节点在审批上下文变化后复用旧结果。
 
-当前 pipeline 支持 `--auto-approve` / TUI `Ctrl+R` 自动接受规划节点并记录审批事件到 SQLite 和 JSONL。自由聊天式审批、artifact diff 展示和人工逐节点批准还没有完整 UI；底层 `messages` 表和审批消息 hash 已就绪。
+当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 的 F4 屏幕提供基础批准、重试、放弃章节和重写章节控件；完整 artifact diff 和可视化节点树仍是后续增强。
 
 ## auto-approve
 
@@ -74,7 +74,7 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 
 `rewrite_chapter` 用于丢弃已有创作结果并重新生成。它必须递增 generation，并使旧 artifact、旧结构化索引贡献和下游依赖失效。
 
-`abandon_chapter` 也必须使对应 generation 的 artifact、索引贡献和下游依赖失效。当前 `WorkflowService.abandon_chapter()` 与 `WorkflowService.rewrite_chapter()` 已递增章节 generation，并把旧 generation 写入 `abandoned_generations`，结构化索引读取时会撤回该 generation 的提及事实。更完整的 artifact/downstream 自动失效仍在后续集成。
+`abandon_chapter` 也必须使对应 generation 的 artifact、索引贡献和下游依赖失效。当前 `WorkflowService.abandon_chapter()` 与 `WorkflowService.rewrite_chapter()` 已递增章节 generation，并把旧 generation 写入 `abandoned_generations`，结构化索引读取时会撤回该 generation 的提及事实。服务还会失效相关章节产物、`run_summary/story_index/story_state/range_summary` 等投影 artifact，以及该章和后续章节节点；下一次 resume 不会直接复用旧完成摘要或旧章节输出。
 
 ## 修订子循环
 
@@ -95,11 +95,12 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 
 - `start_run()` 会读取章节、获取输入目录锁、创建 SQLite 状态库、写入 `run_started` JSONL 事件。
 - `retry_node()` 会记录 `node_retry_requested` 事件。
+- `inspect_run()` 会只读打开 runtime，不获取项目锁、不修改 run 状态、不写 `run_resumed`，供 info/stats/list 类命令使用。
 - `resume_run()` 会重新打开 `logs/<runtime_id>/state.sqlite`，获取项目锁，并记录 `run_resumed`。
-- `abandon_chapter()` 会递增 generation、登记废弃 generation，并记录 `chapter_abandon_requested` 事件。
-- `rewrite_chapter()` 会递增 generation、登记废弃 generation，并记录 `chapter_rewrite_requested` 事件。
+- `abandon_chapter()` 会递增 generation、登记废弃 generation、失效相关 artifact/node，并记录 `chapter_abandon_requested` 事件。
+- `rewrite_chapter()` 会递增 generation、登记废弃 generation、失效相关 artifact/node，并记录 `chapter_rewrite_requested` 事件。
 - `record_approval_message()` 会写入审批聊天消息并更新消息 hash。
-- `approve_artifact()` 会批准指定 artifact 版本。
+- `approve_artifact()` 会批准指定 artifact 版本，并把 artifact 行从讨论稿转为已批准定稿。
 - `InklinkPipeline.update_artifact_with_chat()` 会通过 `update_outline`、`update_chapter_plan` 或 `update_scene_plan` 工具生成新的讨论稿 artifact 版本。
 - `usage_stats()` 会从持久化 LLM 调用记录聚合 profile/model/task 用量。
 - `WorkflowExecutor` 能按依赖运行节点、拒绝重复节点和循环依赖，并在 runner 失败时标记 failed。
@@ -108,6 +109,6 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 - 确定性检查覆盖章节字数、场景字数、场景总目标区间、必须人物/关键词和重复回收伏笔。
 - `output` 模式写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`；`writeback` 模式拒绝覆盖已存在目标文件。
 - `--resume-runtime-id` 会恢复同一 runtime，复用已成功 LLM tool result，并跳过已完成且输出文件仍存在的章节。
-- `inklink workflow ...` 子命令可对已有 runtime 执行 info、stats、message、chat-update、approve、retry、abandon 和 rewrite。
+- `inklink workflow ...` 子命令可对已有 runtime 执行 info、stats、nodes、artifacts、artifact、approvals、messages、events、message、chat-update、approve、retry、abandon 和 rewrite。查询类命令使用只读 inspect，不会把已完成 run 改回 running。
 
-仍未完整接通的部分包括：多轮审批聊天、artifact diff、可视化节点树、完整结构化检索查询、artifact/downstream 自动失效和 shallow 分析自动升级。
+仍未完整接通的部分包括：artifact diff、可视化 DAG 节点树、完整结构化检索查询、后台 daemon 和 shallow 分析自动升级。

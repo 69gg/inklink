@@ -1,7 +1,13 @@
-from textual.widgets import Static
+from textual.widgets import Button, Input, Static
 
 from inklink.tui.app import InklinkApp
-from inklink.tui.screens import DashboardScreen, StatsScreen
+from inklink.tui.screens import (
+    DashboardScreen,
+    RuntimeApprovalsScreen,
+    RuntimeArtifactsScreen,
+    RuntimeLogScreen,
+    StatsScreen,
+)
 from inklink.workflow.pipeline import PipelineSummary, RunStats
 
 
@@ -55,6 +61,22 @@ async def test_tui_f2_shows_stats_screen() -> None:
         assert isinstance(pilot.app.screen, StatsScreen)
         assert pilot.app.screen.id == "stats"
         assert pilot.app.screen.title == "统计"
+
+
+async def test_tui_runtime_screens_open_from_function_keys() -> None:
+    app = InklinkApp()
+
+    async with app.run_test() as pilot:
+        await pilot.press("f3")
+        assert isinstance(pilot.app.screen, RuntimeArtifactsScreen)
+        await pilot.press("escape")
+        await pilot.press("f4")
+        assert isinstance(pilot.app.screen, RuntimeApprovalsScreen)
+        assert pilot.app.screen.query_one("#approval-id", Input)
+        assert pilot.app.screen.query_one("#approve-artifact", Button)
+        await pilot.press("escape")
+        await pilot.press("f5")
+        assert isinstance(pilot.app.screen, RuntimeLogScreen)
 
 
 async def test_tui_ctrl_r_starts_pipeline_when_input_dir_is_set(monkeypatch, tmp_path) -> None:

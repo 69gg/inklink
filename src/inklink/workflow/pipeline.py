@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -57,6 +57,13 @@ class ToolLLM(Protocol):
         input_text: str,
         schema: dict[str, object],
     ) -> ToolCallResult: ...
+
+
+class ReviewFailureApprovalRequired(RuntimeError):
+    def __init__(self, *, chapter_number: int, issues: Sequence[object]) -> None:
+        super().__init__(f"review failure approval required for chapter {chapter_number}")
+        self.chapter_number = chapter_number
+        self.issues = list(issues)
 
 
 class ToolCallResult(BaseModel):
@@ -193,6 +200,8 @@ class PipelineSummary(BaseModel):
     generated_chapters: list[int]
     output_files: list[Path]
     stats: RunStats
+    status: str = "completed"
+    waiting_approval_id: str | None = None
 
 
 class RetrievalItem(BaseModel):
@@ -390,82 +399,140 @@ class InklinkPipeline:
                     budget=config.writing.retrieval_token_budget,
                 )
 
-                outline = await self._call_model(
-                    config=config,
-                    runtime_id=run.runtime_id,
-                    store=store,
-                    stats=stats,
-                    event_log=event_log,
-                    task_type="outline_planning",
-                    tool_spec=_TOOL_SPECS["propose_outline"],
-                    input_payload={
-                        "story_state": story_state.model_dump(mode="json"),
-                        "retrieval_context": retrieval_context,
-                        "chapter_count": options.chapter_count,
-                    },
-                )
-                _write_json(artifacts_dir / "outline.json", outline.model_dump(mode="json"))
-                outline_version = store.upsert_artifact(
-                    artifact_id="outline",
-                    artifact_type="outline",
-                    payload=outline.model_dump(mode="json"),
-                    is_draft=not options.auto_approve,
-                    is_approved=options.auto_approve,
-                    approval_id="outline",
-                )
-                _record_approval(
-                    event_log,
-                    store,
-                    "outline",
-                    options.auto_approve,
-                    artifact_id="outline",
-                    artifact_version=outline_version,
-                )
+                outline_artifact = _approved_artifact_if_accepted(store, "outline", "outline")
+                if outline_artifact is None:
+                    outline = await self._call_model(
+                        config=config,
+                        runtime_id=run.runtime_id,
+                        store=store,
+                        stats=stats,
+                        event_log=event_log,
+                        task_type="outline_planning",
+                        tool_spec=_TOOL_SPECS["propose_outline"],
+                        input_payload={
+                            "story_state": story_state.model_dump(mode="json"),
+                            "retrieval_context": retrieval_context,
+                            "chapter_count": options.chapter_count,
+                        },
+                    )
+                    _write_json(artifacts_dir / "outline.json", outline.model_dump(mode="json"))
+                    outline_auto = _should_auto_approve(
+                        options.auto_approve,
+                        config.approvals.auto_approve_outline,
+                    )
+                    outline_version = store.upsert_artifact(
+                        artifact_id="outline",
+                        artifact_type="outline",
+                        payload=outline.model_dump(mode="json"),
+                        is_draft=not outline_auto,
+                        is_approved=outline_auto,
+                        approval_id="outline",
+                    )
+                    _record_approval(
+                        event_log,
+                        store,
+                        "outline",
+                        outline_auto,
+                        artifact_id="outline",
+                        artifact_version=outline_version,
+                    )
+                    if not outline_auto:
+                        return _pause_for_approval(
+                            runtime_id=run.runtime_id,
+                            log_dir=run.log_dir,
+                            store=store,
+                            event_log=event_log,
+                            stats=stats,
+                            approval_id="outline",
+                        )
+                else:
+                    outline = _outline_from_artifact(outline_artifact)
+                    event_log.write(
+                        "approval_artifact_reused",
+                        {
+                            "runtime_id": run.runtime_id,
+                            "approval_id": "outline",
+                            "artifact_id": "outline",
+                            "version": outline_artifact["version"],
+                        },
+                    )
 
-                chapter_plan = await self._call_model(
-                    config=config,
-                    runtime_id=run.runtime_id,
-                    store=store,
-                    stats=stats,
-                    event_log=event_log,
-                    task_type="chapter_planning",
-                    tool_spec=_TOOL_SPECS["propose_chapter_plan"],
-                    input_payload={
-                        "outline": outline.model_dump(mode="json"),
-                        "retrieval_context": retrieval_context,
-                        "start_chapter": options.start_chapter or len(chapters) + 1,
-                        "chapter_count": options.chapter_count,
-                        "min_chars": options.min_chars,
-                        "max_chars": options.max_chars,
-                    },
-                )
-                chapter_contracts = _normalize_chapter_contracts(
-                    plan=chapter_plan,
-                    start_chapter=options.start_chapter or len(chapters) + 1,
-                    chapter_count=options.chapter_count,
-                    min_chars=options.min_chars,
-                    max_chars=options.max_chars,
-                )
-                _write_json(
-                    artifacts_dir / "chapter_plan.json",
-                    [contract.model_dump(mode="json") for contract in chapter_contracts],
-                )
-                chapter_plan_version = store.upsert_artifact(
-                    artifact_id="chapter_plan",
-                    artifact_type="chapter_plan",
-                    payload=[contract.model_dump(mode="json") for contract in chapter_contracts],
-                    is_draft=not options.auto_approve,
-                    is_approved=options.auto_approve,
-                    approval_id="chapter_plan",
-                )
-                _record_approval(
-                    event_log,
+                chapter_plan_artifact = _approved_artifact_if_accepted(
                     store,
                     "chapter_plan",
-                    options.auto_approve,
-                    artifact_id="chapter_plan",
-                    artifact_version=chapter_plan_version,
+                    "chapter_plan",
                 )
+                if chapter_plan_artifact is None:
+                    chapter_plan = await self._call_model(
+                        config=config,
+                        runtime_id=run.runtime_id,
+                        store=store,
+                        stats=stats,
+                        event_log=event_log,
+                        task_type="chapter_planning",
+                        tool_spec=_TOOL_SPECS["propose_chapter_plan"],
+                        input_payload={
+                            "outline": outline.model_dump(mode="json"),
+                            "retrieval_context": retrieval_context,
+                            "start_chapter": options.start_chapter or len(chapters) + 1,
+                            "chapter_count": options.chapter_count,
+                            "min_chars": options.min_chars,
+                            "max_chars": options.max_chars,
+                        },
+                    )
+                    chapter_contracts = _normalize_chapter_contracts(
+                        plan=chapter_plan,
+                        start_chapter=options.start_chapter or len(chapters) + 1,
+                        chapter_count=options.chapter_count,
+                        min_chars=options.min_chars,
+                        max_chars=options.max_chars,
+                    )
+                    _write_json(
+                        artifacts_dir / "chapter_plan.json",
+                        [contract.model_dump(mode="json") for contract in chapter_contracts],
+                    )
+                    chapter_plan_auto = _should_auto_approve(
+                        options.auto_approve,
+                        config.approvals.auto_approve_chapter_plan,
+                    )
+                    chapter_plan_version = store.upsert_artifact(
+                        artifact_id="chapter_plan",
+                        artifact_type="chapter_plan",
+                        payload=[
+                            contract.model_dump(mode="json") for contract in chapter_contracts
+                        ],
+                        is_draft=not chapter_plan_auto,
+                        is_approved=chapter_plan_auto,
+                        approval_id="chapter_plan",
+                    )
+                    _record_approval(
+                        event_log,
+                        store,
+                        "chapter_plan",
+                        chapter_plan_auto,
+                        artifact_id="chapter_plan",
+                        artifact_version=chapter_plan_version,
+                    )
+                    if not chapter_plan_auto:
+                        return _pause_for_approval(
+                            runtime_id=run.runtime_id,
+                            log_dir=run.log_dir,
+                            store=store,
+                            event_log=event_log,
+                            stats=stats,
+                            approval_id="chapter_plan",
+                        )
+                else:
+                    chapter_contracts = _chapter_contracts_from_artifact(chapter_plan_artifact)
+                    event_log.write(
+                        "approval_artifact_reused",
+                        {
+                            "runtime_id": run.runtime_id,
+                            "approval_id": "chapter_plan",
+                            "artifact_id": "chapter_plan",
+                            "version": chapter_plan_artifact["version"],
+                        },
+                    )
 
                 previous_generated_body = ""
                 for contract in chapter_contracts:
@@ -496,36 +563,77 @@ class InklinkPipeline:
                         status="running",
                         attempt=generation,
                     )
-                    scene_plan = await self._call_model(
-                        config=config,
-                        runtime_id=run.runtime_id,
-                        store=store,
-                        stats=stats,
-                        event_log=event_log,
-                        task_type="scene_planning",
-                        tool_spec=_TOOL_SPECS["propose_scene_plan"],
-                        generation=generation,
-                        input_payload={
-                            "chapter_contract": contract.model_dump(mode="json"),
-                            "story_state": story_state.model_dump(mode="json"),
-                            "retrieval_context": retrieval_context,
-                            "previous_generated_body": previous_generated_body,
-                        },
-                    )
-                    _record_approval(
-                        event_log,
+                    scene_plan_id = f"scene_plan:{contract.chapter_number}"
+                    scene_plan_artifact = _approved_artifact_if_accepted(
                         store,
-                        f"scene_plan:{contract.chapter_number}",
-                        options.auto_approve,
+                        scene_plan_id,
+                        scene_plan_id,
                     )
-                    store.upsert_artifact(
-                        artifact_id=f"scene_plan:{contract.chapter_number}",
-                        artifact_type="scene_plan",
-                        payload=scene_plan.model_dump(mode="json"),
-                        is_draft=not options.auto_approve,
-                        is_approved=options.auto_approve,
-                        approval_id=f"scene_plan:{contract.chapter_number}",
-                    )
+                    if scene_plan_artifact is None:
+                        scene_plan = await self._call_model(
+                            config=config,
+                            runtime_id=run.runtime_id,
+                            store=store,
+                            stats=stats,
+                            event_log=event_log,
+                            task_type="scene_planning",
+                            tool_spec=_TOOL_SPECS["propose_scene_plan"],
+                            generation=generation,
+                            input_payload={
+                                "chapter_contract": contract.model_dump(mode="json"),
+                                "story_state": story_state.model_dump(mode="json"),
+                                "retrieval_context": retrieval_context,
+                                "previous_generated_body": previous_generated_body,
+                            },
+                        )
+                        scene_plan_auto = _should_auto_approve(
+                            options.auto_approve,
+                            config.approvals.auto_approve_scene_plan,
+                        )
+                        scene_plan_version = store.upsert_artifact(
+                            artifact_id=scene_plan_id,
+                            artifact_type="scene_plan",
+                            payload=scene_plan.model_dump(mode="json"),
+                            is_draft=not scene_plan_auto,
+                            is_approved=scene_plan_auto,
+                            approval_id=scene_plan_id,
+                        )
+                        _record_approval(
+                            event_log,
+                            store,
+                            scene_plan_id,
+                            scene_plan_auto,
+                            artifact_id=scene_plan_id,
+                            artifact_version=scene_plan_version,
+                        )
+                        if not scene_plan_auto:
+                            store.create_or_update_approval(
+                                approval_id=scene_plan_id,
+                                approval_type="scene_plan",
+                                status="waiting",
+                                auto_approve=False,
+                                artifact_id=scene_plan_id,
+                                artifact_version=scene_plan_version,
+                            )
+                            return _pause_for_approval(
+                                runtime_id=run.runtime_id,
+                                log_dir=run.log_dir,
+                                store=store,
+                                event_log=event_log,
+                                stats=stats,
+                                approval_id=scene_plan_id,
+                            )
+                    else:
+                        scene_plan = ScenePlan.model_validate(scene_plan_artifact["payload"])
+                        event_log.write(
+                            "approval_artifact_reused",
+                            {
+                                "runtime_id": run.runtime_id,
+                                "approval_id": scene_plan_id,
+                                "artifact_id": scene_plan_id,
+                                "version": scene_plan_artifact["version"],
+                            },
+                        )
                     draft_package = await self._draft_chapter(
                         config=config,
                         runtime_id=run.runtime_id,
@@ -538,19 +646,33 @@ class InklinkPipeline:
                         previous_generated_body=previous_generated_body,
                         generation=generation,
                     )
-                    draft = await self._review_and_revise(
-                        config=config,
-                        runtime_id=run.runtime_id,
-                        store=store,
-                        stats=stats,
-                        event_log=event_log,
-                        contract=contract,
-                        scene_plan=scene_plan,
-                        scene_drafts=draft_package.scenes,
-                        draft=draft_package.draft,
-                        max_revision_rounds=max_revision_rounds,
-                        generation=generation,
-                    )
+                    try:
+                        draft = await self._review_and_revise(
+                            config=config,
+                            runtime_id=run.runtime_id,
+                            store=store,
+                            stats=stats,
+                            event_log=event_log,
+                            contract=contract,
+                            scene_plan=scene_plan,
+                            scene_drafts=draft_package.scenes,
+                            draft=draft_package.draft,
+                            max_revision_rounds=max_revision_rounds,
+                            generation=generation,
+                            auto_approve_review_failure=_should_auto_approve(
+                                options.auto_approve,
+                                config.approvals.auto_approve_review_failure,
+                            ),
+                        )
+                    except ReviewFailureApprovalRequired as exc:
+                        return _pause_for_approval(
+                            runtime_id=run.runtime_id,
+                            log_dir=run.log_dir,
+                            store=store,
+                            event_log=event_log,
+                            stats=stats,
+                            approval_id=f"review_failure:{exc.chapter_number}",
+                        )
                     generated_analysis = await self._call_model(
                         config=config,
                         runtime_id=run.runtime_id,
@@ -615,6 +737,7 @@ class InklinkPipeline:
                     generated_chapters=generated_chapters,
                     output_files=output_files,
                     stats=stats,
+                    status="completed",
                 )
                 _write_json(artifacts_dir / "run_summary.json", summary.model_dump(mode="json"))
                 store.upsert_artifact(
@@ -748,6 +871,7 @@ class InklinkPipeline:
         draft: DraftChapter,
         max_revision_rounds: int,
         generation: int,
+        auto_approve_review_failure: bool,
     ) -> DraftChapter:
         current = draft
         for attempt in range(max_revision_rounds + 1):
@@ -764,12 +888,22 @@ class InklinkPipeline:
                     issue.model_dump(mode="json") for issue in check_report.issues
                 ]
                 if attempt >= max_revision_rounds:
-                    event_log.write(
-                        "review_failure_waiting",
-                        {
-                            "chapter_number": contract.chapter_number,
-                            "issues": deterministic_issues,
-                        },
+                    approval_id = f"review_failure:{contract.chapter_number}"
+                    if _approval_is_accepted(store, approval_id):
+                        event_log.write(
+                            "review_failure_approval_reused",
+                            {
+                                "chapter_number": contract.chapter_number,
+                                "approval_id": approval_id,
+                            },
+                        )
+                        return current
+                    _handle_review_failure_limit(
+                        event_log=event_log,
+                        store=store,
+                        chapter_number=contract.chapter_number,
+                        issues=deterministic_issues,
+                        auto_approve=auto_approve_review_failure,
                     )
                     return current
                 current = await self._revise(
@@ -804,9 +938,22 @@ class InklinkPipeline:
             if review.passed:
                 return current
             if attempt >= max_revision_rounds:
-                event_log.write(
-                    "review_failure_waiting",
-                    {"chapter_number": contract.chapter_number, "issues": review.issues},
+                approval_id = f"review_failure:{contract.chapter_number}"
+                if _approval_is_accepted(store, approval_id):
+                    event_log.write(
+                        "review_failure_approval_reused",
+                        {
+                            "chapter_number": contract.chapter_number,
+                            "approval_id": approval_id,
+                        },
+                    )
+                    return current
+                _handle_review_failure_limit(
+                    event_log=event_log,
+                    store=store,
+                    chapter_number=contract.chapter_number,
+                    issues=review.issues,
+                    auto_approve=auto_approve_review_failure,
                 )
                 return current
             current = await self._revise(
@@ -1415,7 +1562,8 @@ def _resume_completed_summary(store: StateStore) -> PipelineSummary | None:
     artifact = store.get_latest_artifact("run_summary", approved_only=True)
     if artifact is None:
         return None
-    return PipelineSummary.model_validate(artifact["payload"])
+    summary = PipelineSummary.model_validate(artifact["payload"])
+    return summary if summary.status == "completed" else None
 
 
 def _completed_chapter_output(
@@ -1446,9 +1594,115 @@ def _read_chapter_body(path: Path) -> str:
     return body if separator else text
 
 
+def _pause_for_approval(
+    *,
+    runtime_id: str,
+    log_dir: Path,
+    store: StateStore,
+    event_log: JsonlEventLog,
+    stats: RunStats,
+    approval_id: str,
+) -> PipelineSummary:
+    summary = PipelineSummary(
+        runtime_id=runtime_id,
+        log_dir=log_dir,
+        generated_chapters=[],
+        output_files=[],
+        stats=stats,
+        status="waiting_approval",
+        waiting_approval_id=approval_id,
+    )
+    artifacts_dir = log_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(artifacts_dir / "run_summary.json", summary.model_dump(mode="json"))
+    store.upsert_artifact(
+        artifact_id="run_summary",
+        artifact_type="run_summary",
+        payload=summary.model_dump(mode="json"),
+        is_approved=True,
+    )
+    store.update_run_status(runtime_id, "waiting_approval")
+    event_log.write(
+        "run_waiting_approval",
+        {
+            "runtime_id": runtime_id,
+            "approval_id": approval_id,
+        },
+    )
+    return summary
+
+
 def _write_json(path: Path, payload: object) -> None:
     TypeAdapter(object).validate_python(payload)
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _should_auto_approve(global_auto_approve: bool, scoped_auto_approve: bool) -> bool:
+    return global_auto_approve or scoped_auto_approve
+
+
+def _approval_is_accepted(store: StateStore, approval_id: str) -> bool:
+    approval = store.get_approval(approval_id)
+    return approval is not None and approval["status"] == "accepted"
+
+
+def _approved_artifact_if_accepted(
+    store: StateStore,
+    approval_id: str,
+    artifact_id: str,
+) -> dict[str, object] | None:
+    if not _approval_is_accepted(store, approval_id):
+        return None
+    return store.get_latest_artifact(artifact_id, approved_only=True)
+
+
+def _outline_from_artifact(artifact: dict[str, object]) -> OutlineProposal:
+    payload = artifact["payload"]
+    if not isinstance(payload, dict):
+        raise ValueError("outline artifact payload must be an object")
+    if "change_summary" in payload:
+        update = OutlineUpdate.model_validate(payload)
+        return OutlineProposal(outline=update.outline, notes=update.notes)
+    return OutlineProposal.model_validate(payload)
+
+
+def _chapter_contracts_from_artifact(artifact: dict[str, object]) -> list[ChapterContract]:
+    payload = artifact["payload"]
+    if isinstance(payload, list):
+        return [ChapterContract.model_validate(item) for item in payload]
+    if isinstance(payload, dict):
+        if "change_summary" in payload:
+            return ChapterPlanUpdate.model_validate(payload).chapters
+        return ChapterPlan.model_validate(payload).chapters
+    raise ValueError("chapter plan artifact payload must be a list or object")
+
+
+def _handle_review_failure_limit(
+    *,
+    event_log: JsonlEventLog,
+    store: StateStore,
+    chapter_number: int,
+    issues: Sequence[object],
+    auto_approve: bool,
+) -> None:
+    approval_id = f"review_failure:{chapter_number}"
+    store.create_or_update_approval(
+        approval_id=approval_id,
+        approval_type="review_failure",
+        status="accepted" if auto_approve else "waiting",
+        auto_approve=auto_approve,
+    )
+    event_log.write(
+        "review_failure_auto_accepted" if auto_approve else "review_failure_waiting",
+        {
+            "chapter_number": chapter_number,
+            "issues": issues,
+            "approval_id": approval_id,
+            "auto_approve": auto_approve,
+        },
+    )
+    if not auto_approve:
+        raise ReviewFailureApprovalRequired(chapter_number=chapter_number, issues=issues)
 
 
 def _record_approval(
@@ -1461,6 +1715,8 @@ def _record_approval(
     artifact_version: int | None = None,
 ) -> None:
     approval_id = approval_type
+    if auto_approve and artifact_id is not None and artifact_version is not None:
+        store.approve_artifact_version(artifact_id, artifact_version)
     store.create_or_update_approval(
         approval_id=approval_id,
         approval_type=approval_type,

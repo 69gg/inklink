@@ -66,7 +66,9 @@ def run_chapter_checks(
             issues=issues,
         )
     _check_required_terms(contract=contract, draft=draft, issues=issues)
+    _check_forbidden_terms(contract=contract, draft=draft, issues=issues)
     _check_repeated_plot_thread_resolution(
+        current_chapter=contract.chapter_number,
         plot_threads=plot_threads,
         resolved_thread_ids=resolved_thread_ids or [],
         issues=issues,
@@ -191,8 +193,25 @@ def _check_required_terms(
             )
 
 
+def _check_forbidden_terms(
+    *,
+    contract: ChapterContract,
+    draft: DraftChapter,
+    issues: list[CheckIssue],
+) -> None:
+    for term in contract.forbidden:
+        if term in draft.body:
+            issues.append(
+                CheckIssue(
+                    code="forbidden_term_present",
+                    message=f"Forbidden term {term} is present.",
+                )
+            )
+
+
 def _check_repeated_plot_thread_resolution(
     *,
+    current_chapter: int,
     plot_threads: list[PlotThread],
     resolved_thread_ids: list[str],
     issues: list[CheckIssue],
@@ -207,6 +226,21 @@ def _check_repeated_plot_thread_resolution(
                 CheckIssue(
                     code="plot_thread_repeated_resolution",
                     message=f"Plot thread {thread.thread_id} cannot be resolved again.",
+                )
+            )
+        if (
+            thread.due_chapter is not None
+            and current_chapter > thread.due_chapter
+            and thread.status not in {PlotThreadStatus.RESOLVED, PlotThreadStatus.ABANDONED}
+        ):
+            issues.append(
+                CheckIssue(
+                    code="plot_thread_overdue",
+                    message=(
+                        f"Plot thread {thread.thread_id} is overdue after chapter "
+                        f"{thread.due_chapter}."
+                    ),
+                    severity="warning",
                 )
             )
 

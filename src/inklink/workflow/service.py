@@ -50,9 +50,10 @@ class UsageStatRow:
 @dataclass
 class _ActiveRun:
     run: WorkflowRun
-    lock: ProjectLock
+    lock: ProjectLock | None
     store: StateStore
     event_log: JsonlEventLog
+    read_only: bool = False
     lock_released: bool = False
     store_closed: bool = False
 
@@ -175,6 +176,42 @@ class WorkflowService:
                 store.close()
             raise
 
+    def inspect_run(self, runtime_id: str) -> WorkflowRun:
+        """Open a runtime for read-only inspection without mutating run status or taking a lock."""
+
+        if not runtime_id.strip() or runtime_id != runtime_id.strip():
+            raise ValueError("runtime_id must not be empty or contain leading/trailing whitespace")
+        if runtime_id in self._active_runs:
+            return self._active_runs[runtime_id].run
+
+        log_dir = self._log_root / runtime_id
+        store: StateStore | None = None
+        try:
+            store = StateStore.open(log_dir / "state.sqlite")
+            run_row = store.get_run(runtime_id)
+            normalized_input_dir = Path(str(run_row["input_dir"])).resolve()
+            chapters = load_chapters(normalized_input_dir)
+            run = WorkflowRun(
+                runtime_id=runtime_id,
+                input_dir=normalized_input_dir,
+                log_dir=log_dir,
+                chapter_count=len(chapters),
+            )
+            self._active_runs[runtime_id] = _ActiveRun(
+                run=run,
+                lock=None,
+                store=store,
+                event_log=JsonlEventLog(log_dir / "events.jsonl"),
+                read_only=True,
+                lock_released=True,
+            )
+            self._latest_runtime_id = runtime_id
+            return run
+        except BaseException:
+            if store is not None:
+                store.close()
+            raise
+
     def can_start_run(self, input_dir: Path) -> StartRunCheck:
         normalized_input_dir = input_dir.resolve()
         if normalized_input_dir in self._runtime_id_by_input_dir:
@@ -185,15 +222,19 @@ class WorkflowService:
         return StartRunCheck(allowed=True)
 
     def abandon_chapter(self, chapter_number: int) -> CommandResult:
-        active_run = self._current_run()
-        self._validate_chapter_number(chapter_number, active_run.run.chapter_count)
+        active_run = self._current_writable_run()
+        self._validate_chapter_number(chapter_number)
         next_generation = active_run.store.increment_chapter_generation(chapter_number)
+        invalidated_artifacts = active_run.store.invalidate_artifacts_from_chapter(chapter_number)
+        invalidated_nodes = active_run.store.invalidate_nodes_from_chapter(chapter_number)
         active_run.event_log.write(
             "chapter_abandon_requested",
             {
                 "runtime_id": active_run.run.runtime_id,
                 "chapter_number": chapter_number,
                 "next_generation": next_generation,
+                "invalidated_artifacts": invalidated_artifacts,
+                "invalidated_nodes": invalidated_nodes,
             },
         )
         return CommandResult(
@@ -205,15 +246,19 @@ class WorkflowService:
         )
 
     def rewrite_chapter(self, chapter_number: int) -> CommandResult:
-        active_run = self._current_run()
-        self._validate_chapter_number(chapter_number, active_run.run.chapter_count)
+        active_run = self._current_writable_run()
+        self._validate_chapter_number(chapter_number)
         next_generation = active_run.store.increment_chapter_generation(chapter_number)
+        invalidated_artifacts = active_run.store.invalidate_artifacts_from_chapter(chapter_number)
+        invalidated_nodes = active_run.store.invalidate_nodes_from_chapter(chapter_number)
         active_run.event_log.write(
             "chapter_rewrite_requested",
             {
                 "runtime_id": active_run.run.runtime_id,
                 "chapter_number": chapter_number,
                 "next_generation": next_generation,
+                "invalidated_artifacts": invalidated_artifacts,
+                "invalidated_nodes": invalidated_nodes,
             },
         )
         return CommandResult(
@@ -227,7 +272,7 @@ class WorkflowService:
     def retry_node(self, node_id: str) -> CommandResult:
         if not node_id.strip() or node_id != node_id.strip():
             raise ValueError("node_id must not be empty or contain leading/trailing whitespace")
-        active_run = self._current_run()
+        active_run = self._current_writable_run()
         active_run.event_log.write(
             "node_retry_requested",
             {
@@ -251,7 +296,7 @@ class WorkflowService:
         _validate_non_blank_identifier("role", role)
         if not content.strip():
             raise ValueError("content must not be empty")
-        active_run = self._current_run()
+        active_run = self._current_writable_run()
         message_id = uuid4().hex
         active_run.store.create_or_update_approval(
             approval_id=approval_id,
@@ -294,7 +339,8 @@ class WorkflowService:
         _validate_non_blank_identifier("artifact_id", artifact_id)
         if artifact_version <= 0:
             raise ValueError("artifact_version must be positive")
-        active_run = self._current_run()
+        active_run = self._current_writable_run()
+        active_run.store.approve_artifact_version(artifact_id, artifact_version)
         active_run.store.create_or_update_approval(
             approval_id=approval_id,
             approval_type=approval_type,
@@ -332,7 +378,7 @@ class WorkflowService:
         _validate_non_blank_identifier("artifact_type", artifact_type)
         if approval_id is not None:
             _validate_non_blank_identifier("approval_id", approval_id)
-        active_run = self._current_run()
+        active_run = self._current_writable_run()
         version = active_run.store.upsert_artifact(
             artifact_id=artifact_id,
             artifact_type=artifact_type,
@@ -383,10 +429,40 @@ class WorkflowService:
             )
         return [grouped[key] for key in sorted(grouped)]
 
+    def list_nodes(self) -> list[dict[str, object]]:
+        return self._current_run().store.list_nodes()
+
+    def list_artifacts(self) -> list[dict[str, object]]:
+        return self._current_run().store.list_artifacts()
+
+    def get_artifact(self, artifact_id: str, version: int | None = None) -> dict[str, object]:
+        store = self._current_run().store
+        if version is None:
+            artifact = store.get_latest_artifact(artifact_id)
+            if artifact is None:
+                raise KeyError(artifact_id)
+            return artifact
+        return store.get_artifact_version(artifact_id, version)
+
+    def list_approvals(self) -> list[dict[str, object]]:
+        return self._current_run().store.list_approvals()
+
+    def list_messages(self, approval_id: str | None = None) -> list[dict[str, object]]:
+        return self._current_run().store.list_messages(approval_id)
+
+    def recent_events(self, limit: int = 20) -> list[dict[str, object]]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        path = self._current_run().run.log_dir / "events.jsonl"
+        if not path.exists():
+            return []
+        events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        return [event for event in events[-limit:] if isinstance(event, dict)]
+
     def close(self) -> None:
         first_error: BaseException | None = None
         for runtime_id, active_run in list(self._active_runs.items()):
-            if not active_run.lock_released:
+            if not active_run.lock_released and active_run.lock is not None:
                 try:
                     active_run.lock.release()
                     active_run.lock_released = True
@@ -402,7 +478,7 @@ class WorkflowService:
                         first_error = exc
             if active_run.lock_released and active_run.store_closed:
                 del self._active_runs[runtime_id]
-                del self._runtime_id_by_input_dir[active_run.run.input_dir]
+                self._runtime_id_by_input_dir.pop(active_run.run.input_dir, None)
         if self._latest_runtime_id not in self._active_runs:
             self._latest_runtime_id = next(reversed(self._active_runs), None)
         if first_error is not None:
@@ -413,13 +489,15 @@ class WorkflowService:
             raise WorkflowServiceError("no active workflow run")
         return self._active_runs[self._latest_runtime_id]
 
-    def _validate_chapter_number(self, chapter_number: int, chapter_count: int) -> None:
+    def _current_writable_run(self) -> _ActiveRun:
+        active_run = self._current_run()
+        if active_run.read_only:
+            raise WorkflowServiceError("current workflow run was opened for read-only inspection")
+        return active_run
+
+    def _validate_chapter_number(self, chapter_number: int) -> None:
         if chapter_number <= 0:
             raise ValueError("chapter_number must be positive")
-        if chapter_number > chapter_count:
-            raise ValueError(
-                f"chapter_number must be between 1 and {chapter_count}: {chapter_number}"
-            )
 
 
 def _validate_non_blank_identifier(field_name: str, value: str) -> None:

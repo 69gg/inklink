@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   payload_json TEXT NOT NULL,
   is_draft INTEGER NOT NULL DEFAULT 0,
   is_approved INTEGER NOT NULL DEFAULT 0,
+  is_invalidated INTEGER NOT NULL DEFAULT 0,
   approval_id TEXT,
   source_node_id TEXT,
   source_tool_call_id INTEGER,

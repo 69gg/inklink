@@ -13,9 +13,11 @@ Inklink 仍处于分阶段实现中。当前仓库已经实现：
 - 领域模型、确定性检查、结构化人物索引与 generation 撤回逻辑。
 - OpenAI Python SDK `AsyncOpenAI` 适配层，区分 Responses API 与 Chat Completions API。
 - 可执行端到端 pipeline：章节分析、区间摘要、故事状态合并、大纲、章节计划、场景计划、场景顺序续写、确定性检查、LLM review、自动修订、输出写入和用量统计。
-- 基础 workflow primitive，包括 DAG 执行器、幂等键、run 启动、resume、retry/rewrite/abandon、调用缓存、artifact 版本和 generation 撤回。
+- workflow primitive，包括 DAG 执行器、幂等键、run 启动、只读 inspect、resume、retry/rewrite/abandon、调用缓存、artifact 版本、审批消息和 generation 撤回。
+- 审批门：大纲、章节计划、场景计划和自审失败可暂停 run；`approve` 会把 artifact 版本标为定稿，resume 后继续。
+- 章节级放弃/重写会递增 generation、撤回旧 generation 的索引事实，并失效相关章节产物、run summary 和下游章节节点。
 
-当前 `uv run inklink run --execute ...` 可以直接执行续写 pipeline。TUI 已能通过 `Ctrl+R` 触发同一 pipeline。多轮自由审批聊天、可视化节点树、完整结构化检索和更细的 abandon/rewrite 下游失效仍在后续阶段完善。
+当前 `uv run inklink run --execute ...` 可以直接执行续写 pipeline。TUI 可通过 `Ctrl+R` 触发 pipeline，并通过 F3/F4/F5 查看产物、审批和事件；F4 提供批准、重试、放弃章节和重写章节的基础控件。更完整的 DAG 可视化、artifact diff、精确原文片段检索和后台 daemon 仍属于后续增强。
 
 ## 安装
 
@@ -72,6 +74,12 @@ uv run inklink run ./novel --config config.toml --execute \
 ```bash
 uv run inklink workflow info <runtime_id>
 uv run inklink workflow stats <runtime_id>
+uv run inklink workflow nodes <runtime_id>
+uv run inklink workflow artifacts <runtime_id>
+uv run inklink workflow artifact <runtime_id> outline --version 1
+uv run inklink workflow approvals <runtime_id>
+uv run inklink workflow messages <runtime_id> --approval-id outline
+uv run inklink workflow events <runtime_id> --limit 20
 uv run inklink workflow message <runtime_id> outline "请强化冲突"
 uv run inklink workflow chat-update <runtime_id> outline outline outline "请强化冲突"
 uv run inklink workflow approve <runtime_id> outline outline 1
