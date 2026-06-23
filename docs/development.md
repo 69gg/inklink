@@ -22,6 +22,13 @@ uv run inklink run ./novel --config config.toml --execute \
   --chapter-count 1 --min-chars 800 --max-chars 1800 --auto-approve
 ```
 
+恢复已有 runtime：
+
+```bash
+uv run inklink run ./novel --config config.toml --execute \
+  --resume-runtime-id <runtime_id>
+```
+
 ## 验证命令
 
 提交前运行完整验证：
@@ -50,7 +57,7 @@ uv run pytest tests/test_config.py -q
 | `src/inklink/domain/models.py` | 章节合同、草稿、伏笔、检查报告等领域模型。 |
 | `src/inklink/domain/checks.py` | 中文字数、章节合同、必需人物/关键词和伏笔状态确定性检查。 |
 | `src/inklink/domain/index.py` | 结构化人物索引、generation 撤回和 active score 重算。 |
-| `src/inklink/storage/*` | SQLite schema/store 和 JSONL 审计事件。 |
+| `src/inklink/storage/*` | SQLite schema/store、调用缓存、artifact 版本、generation 事实和 JSONL 审计事件。 |
 | `src/inklink/llm/*` | provider-independent 类型、OpenAI Responses/Chat 适配器、usage 归一化、profile 限流。 |
 | `src/inklink/tools/registry.py` | 内部 function tool schema 与 dispatch 注册。 |
 | `src/inklink/workflow/*` | DAG 节点模型、幂等键、执行器、workflow service 和端到端 pipeline。 |

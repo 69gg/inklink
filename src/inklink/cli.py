@@ -43,6 +43,10 @@ def run(
         str | None,
         typer.Option(help="Override output mode: output or writeback."),
     ] = None,
+    resume_runtime_id: Annotated[
+        str | None,
+        typer.Option(help="Resume an existing logs/<runtime_id> workflow run."),
+    ] = None,
     log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
     auto_approve: Annotated[
         bool,
@@ -59,6 +63,7 @@ def run(
                 config=config,
                 log_root=log_root,
                 output_mode=output_mode,
+                runtime_id=resume_runtime_id,
                 chapter_count=chapter_count,
                 start_chapter=start_chapter,
                 min_chars=min_chars,
@@ -73,6 +78,7 @@ def run(
         for output_file in summary.output_files:
             typer.echo(f"output: {output_file}")
         typer.echo(f"llm_calls: {summary.stats.total_calls}")
+        _print_usage_summary(summary)
         return
     InklinkApp(input_dir=input_dir, config=config).run()
 
@@ -83,6 +89,7 @@ async def _run_pipeline(
     config: Path,
     log_root: Path,
     output_mode: str | None,
+    runtime_id: str | None,
     chapter_count: int,
     start_chapter: int | None,
     min_chars: int,
@@ -100,6 +107,7 @@ async def _run_pipeline(
             config_path=config,
             log_root=log_root,
             output_mode=output_mode,
+            runtime_id=runtime_id,
             chapter_count=chapter_count,
             start_chapter=start_chapter,
             min_chars=min_chars,
@@ -107,3 +115,22 @@ async def _run_pipeline(
             auto_approve=auto_approve,
         )
     )
+
+
+def _print_usage_summary(summary: PipelineSummary) -> None:
+    if summary.stats.by_model:
+        typer.echo("usage_by_model:")
+        for model, bucket in sorted(summary.stats.by_model.items()):
+            typer.echo(
+                "  "
+                f"{model}: calls={bucket.calls} input={bucket.input_tokens} "
+                f"output={bucket.output_tokens} total={bucket.total_tokens}"
+            )
+    if summary.stats.by_task:
+        typer.echo("usage_by_task:")
+        for task, bucket in sorted(summary.stats.by_task.items()):
+            typer.echo(
+                "  "
+                f"{task}: calls={bucket.calls} input={bucket.input_tokens} "
+                f"output={bucket.output_tokens} total={bucket.total_tokens}"
+            )

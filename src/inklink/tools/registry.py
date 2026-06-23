@@ -9,13 +9,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from inklink.domain.models import (
     ChapterAnalysis,
     ChapterContract,
+    ChapterPlanUpdate,
     ChapterReview,
+    CharacterUpdates,
     DraftChapter,
     OutlineProposal,
+    OutlineUpdate,
+    PlotThreadUpdates,
     RangeSummary,
     SceneDraft,
     ScenePlan,
+    ScenePlanUpdate,
     StoryState,
+    WorldbuildingFacts,
 )
 
 ToolHandler = Callable[[dict[str, object]], dict[str, object]]
@@ -45,6 +51,24 @@ class ToolRegistry:
                     handler=_record_chapter_analysis,
                 ),
                 ToolDefinition(
+                    name="record_worldbuilding_facts",
+                    description="Record inferred worldbuilding facts with source chapter.",
+                    parameters=_strict_schema(WorldbuildingFacts),
+                    handler=_accept_validated(WorldbuildingFacts),
+                ),
+                ToolDefinition(
+                    name="record_character_updates",
+                    description="Record character status, traits, and relationship updates.",
+                    parameters=_strict_schema(CharacterUpdates),
+                    handler=_accept_validated(CharacterUpdates),
+                ),
+                ToolDefinition(
+                    name="record_plot_threads",
+                    description="Record plot thread lifecycle updates.",
+                    parameters=_strict_schema(PlotThreadUpdates),
+                    handler=_accept_validated(PlotThreadUpdates),
+                ),
+                ToolDefinition(
                     name="record_range_summary",
                     description="Record a range or volume summary.",
                     parameters=_strict_schema(RangeSummary),
@@ -63,16 +87,34 @@ class ToolRegistry:
                     handler=_accept_validated(OutlineProposal),
                 ),
                 ToolDefinition(
+                    name="update_outline",
+                    description="Update the current outline during approval chat.",
+                    parameters=_strict_schema(OutlineUpdate),
+                    handler=_accept_validated(OutlineUpdate),
+                ),
+                ToolDefinition(
                     name="propose_chapter_plan",
                     description="Propose chapter contracts.",
                     parameters=_strict_schema(_ChapterPlanTool),
                     handler=_accept_validated(_ChapterPlanTool),
                 ),
                 ToolDefinition(
+                    name="update_chapter_plan",
+                    description="Update chapter contracts during approval chat.",
+                    parameters=_strict_schema(ChapterPlanUpdate),
+                    handler=_accept_validated(ChapterPlanUpdate),
+                ),
+                ToolDefinition(
                     name="propose_scene_plan",
                     description="Propose scene contracts for one chapter.",
                     parameters=_strict_schema(ScenePlan),
                     handler=_accept_validated(ScenePlan),
+                ),
+                ToolDefinition(
+                    name="update_scene_plan",
+                    description="Update scene contracts during approval chat.",
+                    parameters=_strict_schema(ScenePlanUpdate),
+                    handler=_accept_validated(ScenePlanUpdate),
                 ),
                 ToolDefinition(
                     name="submit_scene_draft",

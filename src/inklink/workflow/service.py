@@ -113,6 +113,56 @@ class WorkflowService:
                 store.close()
             raise
 
+    def resume_run(self, runtime_id: str) -> WorkflowRun:
+        if not runtime_id.strip() or runtime_id != runtime_id.strip():
+            raise ValueError("runtime_id must not be empty or contain leading/trailing whitespace")
+        if runtime_id in self._active_runs:
+            return self._active_runs[runtime_id].run
+
+        log_dir = self._log_root / runtime_id
+        store: StateStore | None = None
+        lock: ProjectLock | None = None
+        try:
+            store = StateStore.open(log_dir / "state.sqlite")
+            run_row = store.get_run(runtime_id)
+            normalized_input_dir = Path(str(run_row["input_dir"])).resolve()
+            check = self.can_start_run(normalized_input_dir)
+            if not check.allowed:
+                raise WorkflowServiceError(check.reason)
+            lock = ProjectLock.acquire(normalized_input_dir, runtime_id)
+            chapters = load_chapters(normalized_input_dir)
+            event_log = JsonlEventLog(log_dir / "events.jsonl")
+            event_log.write(
+                "run_resumed",
+                {
+                    "runtime_id": runtime_id,
+                    "input_dir": str(normalized_input_dir),
+                    "chapter_count": len(chapters),
+                },
+            )
+            store.update_run_status(runtime_id, "running")
+            run = WorkflowRun(
+                runtime_id=runtime_id,
+                input_dir=normalized_input_dir,
+                log_dir=log_dir,
+                chapter_count=len(chapters),
+            )
+            self._active_runs[runtime_id] = _ActiveRun(
+                run=run,
+                lock=lock,
+                store=store,
+                event_log=event_log,
+            )
+            self._runtime_id_by_input_dir[normalized_input_dir] = runtime_id
+            self._latest_runtime_id = runtime_id
+            return run
+        except BaseException:
+            if lock is not None:
+                lock.release()
+            if store is not None:
+                store.close()
+            raise
+
     def can_start_run(self, input_dir: Path) -> StartRunCheck:
         normalized_input_dir = input_dir.resolve()
         if normalized_input_dir in self._runtime_id_by_input_dir:
@@ -125,36 +175,40 @@ class WorkflowService:
     def abandon_chapter(self, chapter_number: int) -> CommandResult:
         active_run = self._current_run()
         self._validate_chapter_number(chapter_number, active_run.run.chapter_count)
+        next_generation = active_run.store.increment_chapter_generation(chapter_number)
         active_run.event_log.write(
             "chapter_abandon_requested",
             {
                 "runtime_id": active_run.run.runtime_id,
                 "chapter_number": chapter_number,
+                "next_generation": next_generation,
             },
         )
         return CommandResult(
             accepted=True,
             message=(
-                f"accepted abandon_chapter for chapter {chapter_number}; TODO: generation "
-                "increment and index invalidation are not implemented in this primitive"
+                f"accepted abandon_chapter for chapter {chapter_number}; "
+                f"generation={next_generation}"
             ),
         )
 
     def rewrite_chapter(self, chapter_number: int) -> CommandResult:
         active_run = self._current_run()
         self._validate_chapter_number(chapter_number, active_run.run.chapter_count)
+        next_generation = active_run.store.increment_chapter_generation(chapter_number)
         active_run.event_log.write(
             "chapter_rewrite_requested",
             {
                 "runtime_id": active_run.run.runtime_id,
                 "chapter_number": chapter_number,
+                "next_generation": next_generation,
             },
         )
         return CommandResult(
             accepted=True,
             message=(
-                f"accepted rewrite_chapter for chapter {chapter_number}; TODO: generation "
-                "increment and index invalidation are not implemented in this primitive"
+                f"accepted rewrite_chapter for chapter {chapter_number}; "
+                f"generation={next_generation}"
             ),
         )
 

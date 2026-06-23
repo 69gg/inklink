@@ -68,6 +68,15 @@ max_concurrency = 4
 
 [tasks]
 # 未配置任务回退到 models.default。
+chapter_extraction = "default"
+worldbuilding_extraction = "default"
+story_merge = "default"
 range_summary = "default"
+outline_planning = "default"
+outline_chat = "default"
+chapter_planning = "default"
+scene_planning = "default"
+scene_chat = "default"
 drafting = "default"
 review = "default"
+revision = "default"

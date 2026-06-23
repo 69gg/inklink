@@ -426,6 +426,35 @@ def test_service_close_releases_project_lock_for_another_service(tmp_path: Path)
     assert run.input_dir == project.resolve()
 
 
+def test_service_can_resume_existing_run_by_runtime_id(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+    log_root = tmp_path / "logs"
+
+    first = WorkflowService(log_root=log_root)
+    original = first.start_run(project)
+    first.close()
+
+    with WorkflowService(log_root=log_root) as second:
+        resumed = second.resume_run(original.runtime_id)
+
+        assert resumed.runtime_id == original.runtime_id
+        assert resumed.input_dir == project.resolve()
+        assert resumed.chapter_count == 1
+
+    events = read_workflow_events(original.log_dir / "events.jsonl")
+    assert [event["event_type"] for event in events][-1] == "run_resumed"
+
+
+def test_service_resume_rejects_bad_runtime_id(tmp_path: Path) -> None:
+    with (
+        WorkflowService(log_root=tmp_path / "logs") as service,
+        pytest.raises(ValueError, match="runtime_id"),
+    ):
+        service.resume_run(" bad ")
+
+
 def test_service_start_failure_releases_project_lock(tmp_path: Path) -> None:
     project = tmp_path / "novel"
     project.mkdir()
@@ -457,10 +486,10 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
 
         assert abandon.accepted is True
         assert "accepted" in abandon.message
-        assert "TODO" in abandon.message
+        assert "generation=2" in abandon.message
         assert rewrite.accepted is True
         assert "accepted" in rewrite.message
-        assert "TODO" in rewrite.message
+        assert "generation=3" in rewrite.message
         assert retry.accepted is True
         assert "accepted" in retry.message
         with pytest.raises(ValueError, match="chapter_number"):
@@ -479,8 +508,16 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
         "chapter_rewrite_requested",
         "node_retry_requested",
     ]
-    assert events[1]["payload"] == {"runtime_id": run.runtime_id, "chapter_number": 1}
-    assert events[2]["payload"] == {"runtime_id": run.runtime_id, "chapter_number": 1}
+    assert events[1]["payload"] == {
+        "runtime_id": run.runtime_id,
+        "chapter_number": 1,
+        "next_generation": 2,
+    }
+    assert events[2]["payload"] == {
+        "runtime_id": run.runtime_id,
+        "chapter_number": 1,
+        "next_generation": 3,
+    }
     assert events[3]["payload"] == {"runtime_id": run.runtime_id, "node_id": "draft-1"}
 
 

@@ -6,11 +6,17 @@ from inklink.tools.registry import ToolRegistry
 
 EXPECTED_TOOL_NAMES = {
     "record_chapter_analysis",
+    "record_worldbuilding_facts",
+    "record_character_updates",
+    "record_plot_threads",
     "record_range_summary",
     "merge_story_state",
     "propose_outline",
+    "update_outline",
     "propose_chapter_plan",
+    "update_chapter_plan",
     "propose_scene_plan",
+    "update_scene_plan",
     "submit_scene_draft",
     "submit_chapter_review",
     "submit_revision",
@@ -86,6 +92,21 @@ def test_dispatch_calls_known_tool_handler() -> None:
     result = registry.dispatch(
         "record_chapter_analysis",
         {"chapter_number": 1, "summary": "opening"},
+    )
+
+    assert result == {"ok": True}
+
+
+def test_update_outline_tool_validates_payload() -> None:
+    registry = ToolRegistry.default()
+
+    result = registry.dispatch(
+        "update_outline",
+        {
+            "outline": "新的大纲",
+            "change_summary": "强化冲突",
+            "notes": ["保留悬念"],
+        },
     )
 
     assert result == {"ok": True}

@@ -13,9 +13,9 @@ Inklink 仍处于分阶段实现中。当前仓库已经实现：
 - 领域模型、确定性检查、结构化人物索引与 generation 撤回逻辑。
 - OpenAI Python SDK `AsyncOpenAI` 适配层，区分 Responses API 与 Chat Completions API。
 - 可执行端到端 pipeline：章节分析、区间摘要、故事状态合并、大纲、章节计划、场景计划、场景顺序续写、确定性检查、LLM review、自动修订、输出写入和用量统计。
-- 基础 workflow primitive，包括 DAG 执行器、幂等键、run 启动、retry/rewrite/abandon 请求事件。
+- 基础 workflow primitive，包括 DAG 执行器、幂等键、run 启动、resume、retry/rewrite/abandon、调用缓存、artifact 版本和 generation 撤回。
 
-当前 `uv run inklink run --execute ...` 可以直接执行续写 pipeline。TUI 已能通过 `Ctrl+R` 触发同一 pipeline，但多轮自由审批聊天、可视化节点树、长篇检索预算裁剪和完整 abandon/rewrite 回滚仍在后续阶段完善。
+当前 `uv run inklink run --execute ...` 可以直接执行续写 pipeline。TUI 已能通过 `Ctrl+R` 触发同一 pipeline。多轮自由审批聊天、可视化节点树、完整结构化检索和更细的 abandon/rewrite 下游失效仍在后续阶段完善。
 
 ## 安装
 
@@ -57,6 +57,15 @@ uv run inklink run ./novel --config config.toml --execute \
 ```
 
 默认 `output` 模式会写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`。`--output-mode writeback` 会写回输入目录的目标章节号；若目标文件已存在，会拒绝覆盖。
+
+从已有运行恢复：
+
+```bash
+uv run inklink run ./novel --config config.toml --execute \
+  --resume-runtime-id <runtime_id>
+```
+
+恢复时会复用 SQLite 中已成功的 LLM tool result，并跳过已完成且输出文件仍存在的章节。
 
 ## 输入格式
 

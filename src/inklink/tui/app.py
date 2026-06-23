@@ -58,5 +58,6 @@ class InklinkApp(App[None]):
             setup.set_status(f"运行失败: {exc}")
             return
         setup.set_status(
-            f"运行完成: {summary.runtime_id}，生成 {len(summary.generated_chapters)} 章"
+            f"运行完成: {summary.runtime_id}，生成 {len(summary.generated_chapters)} 章，"
+            f"调用 {summary.stats.total_calls} 次"
         )

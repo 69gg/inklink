@@ -146,10 +146,40 @@ class OutlineProposal(BaseModel):
         return _validate_non_blank_list(values)
 
 
+class OutlineUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outline: str = Field(min_length=1)
+    change_summary: str = Field(min_length=1)
+    notes: list[str] = Field(default_factory=list)
+
+    @field_validator("outline", "change_summary")
+    @classmethod
+    def validate_outline_text(cls, value: str) -> str:
+        return _validate_non_blank_string(value)
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, values: list[str]) -> list[str]:
+        return _validate_non_blank_list(values)
+
+
 class ChapterPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     chapters: list[ChapterContract] = Field(min_length=1)
+
+
+class ChapterPlanUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chapters: list[ChapterContract] = Field(min_length=1)
+    change_summary: str = Field(min_length=1)
+
+    @field_validator("change_summary")
+    @classmethod
+    def validate_change_summary(cls, value: str) -> str:
+        return _validate_non_blank_string(value)
 
 
 class SceneContract(BaseModel):
@@ -184,6 +214,19 @@ class ScenePlan(BaseModel):
 
     chapter_number: int = Field(strict=True, gt=0)
     scenes: list[SceneContract] = Field(min_length=1)
+
+
+class ScenePlanUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_number: int = Field(strict=True, gt=0)
+    scenes: list[SceneContract] = Field(min_length=1)
+    change_summary: str = Field(min_length=1)
+
+    @field_validator("change_summary")
+    @classmethod
+    def validate_change_summary(cls, value: str) -> str:
+        return _validate_non_blank_string(value)
 
 
 class SceneDraft(BaseModel):
@@ -232,9 +275,55 @@ class PlotThread(BaseModel):
         return _validate_non_blank_list(values)
 
 
+class WorldbuildingFacts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_number: int = Field(strict=True, gt=0)
+    facts: list[str] = Field(min_length=1)
+
+    @field_validator("facts")
+    @classmethod
+    def validate_facts(cls, values: list[str]) -> list[str]:
+        return _validate_non_blank_list(values)
+
+
+class CharacterUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    traits: list[str] = Field(default_factory=list)
+    relationships: list[str] = Field(default_factory=list)
+    source_chapter: int = Field(strict=True, gt=0)
+
+    @field_validator("name", "status")
+    @classmethod
+    def validate_identity_text(cls, value: str) -> str:
+        return _validate_non_blank_string(value)
+
+    @field_validator("traits", "relationships")
+    @classmethod
+    def validate_items(cls, values: list[str]) -> list[str]:
+        return _validate_non_blank_list(values)
+
+
+class CharacterUpdates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    updates: list[CharacterUpdate] = Field(min_length=1)
+
+
+class PlotThreadUpdates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    threads: list[PlotThread] = Field(min_length=1)
+
+
 CheckIssueCode = Literal[
     "chapter_number_mismatch",
     "word_count_out_of_range",
+    "scene_word_count_out_of_range",
+    "scene_total_out_of_range",
     "required_character_missing",
     "required_keyword_missing",
     "plot_thread_repeated_resolution",

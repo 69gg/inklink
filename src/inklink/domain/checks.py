@@ -9,6 +9,8 @@ from inklink.domain.models import (
     DraftChapter,
     PlotThread,
     PlotThreadStatus,
+    SceneContract,
+    SceneDraft,
 )
 
 CJK_UNIFIED_IDEOGRAPH_RANGES: tuple[tuple[int, int], ...] = (
@@ -45,11 +47,24 @@ def run_chapter_checks(
     contract: ChapterContract,
     draft: DraftChapter,
     plot_threads: list[PlotThread],
+    scene_contracts: list[SceneContract] | None = None,
+    scene_drafts: list[SceneDraft] | None = None,
+    tolerance_ratio: float = 0.0,
     resolved_thread_ids: list[str] | None = None,
 ) -> CheckReport:
     issues: list[CheckIssue] = []
     _check_chapter_identity(contract=contract, draft=draft, issues=issues)
-    _check_word_count(contract=contract, draft=draft, issues=issues)
+    _check_word_count(
+        contract=contract, draft=draft, issues=issues, tolerance_ratio=tolerance_ratio
+    )
+    if scene_contracts is not None and scene_drafts is not None:
+        _check_scene_word_counts(
+            scene_contracts=scene_contracts,
+            scene_drafts=scene_drafts,
+            chapter_contract=contract,
+            tolerance_ratio=tolerance_ratio,
+            issues=issues,
+        )
     _check_required_terms(contract=contract, draft=draft, issues=issues)
     _check_repeated_plot_thread_resolution(
         plot_threads=plot_threads,
@@ -82,15 +97,71 @@ def _check_word_count(
     contract: ChapterContract,
     draft: DraftChapter,
     issues: list[CheckIssue],
+    tolerance_ratio: float,
 ) -> None:
     count = count_chinese_chars(draft.body)
-    if count < contract.min_chars or count > contract.max_chars:
+    min_chars, max_chars = _range_with_tolerance(
+        min_chars=contract.min_chars,
+        max_chars=contract.max_chars,
+        tolerance_ratio=tolerance_ratio,
+    )
+    if count < min_chars or count > max_chars:
         issues.append(
             CheckIssue(
                 code="word_count_out_of_range",
                 message=(
                     f"Chinese character count {count} is outside target range "
-                    f"{contract.min_chars}-{contract.max_chars}."
+                    f"{min_chars}-{max_chars}."
+                ),
+            )
+        )
+
+
+def _check_scene_word_counts(
+    *,
+    scene_contracts: list[SceneContract],
+    scene_drafts: list[SceneDraft],
+    chapter_contract: ChapterContract,
+    tolerance_ratio: float,
+    issues: list[CheckIssue],
+) -> None:
+    drafts_by_id = {draft.scene_id: draft for draft in scene_drafts}
+    total_min = 0
+    total_max = 0
+    for contract in scene_contracts:
+        total_min += contract.min_chars
+        total_max += contract.max_chars
+        draft = drafts_by_id.get(contract.scene_id)
+        if draft is None:
+            continue
+        count = count_chinese_chars(draft.text)
+        min_chars, max_chars = _range_with_tolerance(
+            min_chars=contract.min_chars,
+            max_chars=contract.max_chars,
+            tolerance_ratio=tolerance_ratio,
+        )
+        if count < min_chars or count > max_chars:
+            issues.append(
+                CheckIssue(
+                    code="scene_word_count_out_of_range",
+                    message=(
+                        f"Scene {contract.scene_id} Chinese character count {count} is "
+                        f"outside target range {min_chars}-{max_chars}."
+                    ),
+                )
+            )
+    chapter_min, chapter_max = _range_with_tolerance(
+        min_chars=chapter_contract.min_chars,
+        max_chars=chapter_contract.max_chars,
+        tolerance_ratio=tolerance_ratio,
+    )
+    if total_max < chapter_min or total_min > chapter_max:
+        issues.append(
+            CheckIssue(
+                code="scene_total_out_of_range",
+                message=(
+                    f"Scene target total {total_min}-{total_max} is outside chapter range "
+                    f"{chapter_min}-{chapter_max}."
                 ),
             )
         )
@@ -138,3 +209,17 @@ def _check_repeated_plot_thread_resolution(
                     message=f"Plot thread {thread.thread_id} cannot be resolved again.",
                 )
             )
+
+
+def _range_with_tolerance(
+    *,
+    min_chars: int,
+    max_chars: int,
+    tolerance_ratio: float,
+) -> tuple[int, int]:
+    if tolerance_ratio < 0:
+        raise ValueError("tolerance_ratio must be non-negative")
+    return (
+        max(0, int(min_chars * (1 - tolerance_ratio))),
+        int(max_chars * (1 + tolerance_ratio)),
+    )

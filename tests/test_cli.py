@@ -65,7 +65,19 @@ def test_cli_run_execute_invokes_pipeline(monkeypatch: MonkeyPatch, tmp_path: Pa
                 log_dir=tmp_path / "logs" / "runtime",
                 generated_chapters=[3],
                 output_files=[tmp_path / "logs" / "runtime" / "outputs" / "chapters" / "3.txt"],
-                stats=RunStats(total_calls=2),
+                stats=RunStats.model_validate(
+                    {
+                        "total_calls": 2,
+                        "by_model": {
+                            "fake-model": {
+                                "calls": 2,
+                                "input_tokens": 10,
+                                "output_tokens": 6,
+                                "total_tokens": 16,
+                            }
+                        },
+                    }
+                ),
             )
 
     class FakeLLM:
@@ -104,6 +116,8 @@ api_key_env = "MISSING_FAKE_KEY"
             "--max-chars",
             "80",
             "--auto-approve",
+            "--resume-runtime-id",
+            "runtime",
         ],
     )
 
@@ -114,3 +128,6 @@ api_key_env = "MISSING_FAKE_KEY"
     assert options.input_dir == novel
     assert options.chapter_count == 1
     assert options.auto_approve is True
+    assert options.runtime_id == "runtime"
+    assert "usage_by_model" in result.output
+    assert "fake-model" in result.output

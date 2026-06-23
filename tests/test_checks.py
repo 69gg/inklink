@@ -4,7 +4,14 @@ import pytest
 from pydantic import ValidationError
 
 from inklink.domain.checks import count_chinese_chars, run_chapter_checks
-from inklink.domain.models import ChapterContract, DraftChapter, PlotThread, PlotThreadStatus
+from inklink.domain.models import (
+    ChapterContract,
+    DraftChapter,
+    PlotThread,
+    PlotThreadStatus,
+    SceneContract,
+    SceneDraft,
+)
 
 
 def test_count_chinese_chars_ignores_latin_digits_and_punctuation() -> None:
@@ -174,6 +181,61 @@ def test_chapter_check_fails_when_chinese_count_is_out_of_range() -> None:
     assert any(issue.code == "word_count_out_of_range" for issue in long_report.issues)
     assert "5" in short_report.issues[0].message
     assert "10" in short_report.issues[0].message
+
+
+def test_chapter_check_respects_word_count_tolerance() -> None:
+    contract = ChapterContract(
+        chapter_number=2,
+        title="第二章",
+        min_chars=10,
+        max_chars=10,
+        required_characters=[],
+        required_keywords=[],
+        scene_ids=["s1"],
+    )
+    draft = DraftChapter(chapter_number=2, title="第二章", body="他来到旧山门之前。")
+
+    report = run_chapter_checks(
+        contract=contract,
+        draft=draft,
+        plot_threads=[],
+        tolerance_ratio=0.2,
+    )
+
+    assert report.passed
+
+
+def test_chapter_check_validates_scene_word_ranges_and_total() -> None:
+    contract = ChapterContract(
+        chapter_number=2,
+        title="第二章",
+        min_chars=20,
+        max_chars=30,
+        required_characters=[],
+        required_keywords=[],
+        scene_ids=["s1"],
+    )
+    draft = DraftChapter(chapter_number=2, title="第二章", body="他来到山门前又看见旧灯亮起。")
+    scene_contract = SceneContract(
+        scene_id="s1",
+        goal="开场",
+        characters=[],
+        required_keywords=[],
+        min_chars=1,
+        max_chars=2,
+    )
+    scene_draft = SceneDraft(scene_id="s1", text="他来到山门前")
+
+    report = run_chapter_checks(
+        contract=contract,
+        draft=draft,
+        plot_threads=[],
+        scene_contracts=[scene_contract],
+        scene_drafts=[scene_draft],
+    )
+
+    assert any(issue.code == "scene_word_count_out_of_range" for issue in report.issues)
+    assert any(issue.code == "scene_total_out_of_range" for issue in report.issues)
 
 
 def test_chapter_check_fails_when_required_name_missing() -> None:

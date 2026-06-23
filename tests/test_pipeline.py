@@ -278,6 +278,50 @@ async def test_pipeline_generates_chapter_outputs_and_stats(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_pipeline_resume_reuses_successful_calls_and_completed_output(
+    tmp_path: Path,
+) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+    first_llm = FakeToolLLM()
+
+    first = await InklinkPipeline(llm=first_llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+        )
+    )
+    second_llm = FakeToolLLM()
+
+    second = await InklinkPipeline(llm=second_llm).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            runtime_id=first.runtime_id,
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+            auto_approve=True,
+        )
+    )
+
+    assert second.runtime_id == first.runtime_id
+    assert second.output_files == first.output_files
+    assert second_llm.calls == []
+    assert second.stats.total_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_pipeline_revises_when_deterministic_check_fails(tmp_path: Path) -> None:
     novel = tmp_path / "novel"
     novel.mkdir()

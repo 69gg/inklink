@@ -21,7 +21,7 @@ Inklink 的长篇上下文设计以结构化索引为唯一事实来源。全书
 
 1000+ 章项目不能把全书所有实体都注入每次 prompt。设计目标是只注入活跃/相关实体；`inactive`、`dead`、`resolved` 等低优先级实体继续保存在 SQLite 中，按需检索。
 
-当前代码已实现人物提及事实、有效 generation 过滤和 active score 重算。更完整的实体状态分类、SQLite 检索查询和 prompt 注入策略属于后续集成。
+当前代码已实现人物提及事实、有效 generation 过滤、active score 重算，并把提及事实持久化到 SQLite。更完整的实体状态分类、伏笔/事件/世界观索引查询和 prompt 注入策略属于后续集成。
 
 ## 检索预算
 
@@ -46,7 +46,7 @@ Inklink 的长篇上下文设计以结构化索引为唯一事实来源。全书
 
 shallow 与 deep 的差异主要在叙事摘要丰富程度；结构化字段仍应尽量完整。缺关键字段时，应按需把该章节升级为 deep 分析。
 
-`cold_start.recent_chapters_to_deep_analyze` 控制最近多少章使用 deep。当前配置键已实现，完整冷启动 DAG 仍在后续集成。
+`cold_start.recent_chapters_to_deep_analyze` 控制最近多少章使用 deep。当前 pipeline 已把 `depth = shallow|deep` 纳入 `chapter_extraction` 输入；按需自动升级 shallow 来源章节仍在后续集成。
 
 ## 区间摘要
 

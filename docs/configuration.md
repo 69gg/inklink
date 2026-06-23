@@ -38,7 +38,7 @@ Inklink 从 `config.toml` 读取配置，示例见仓库根目录的 `config.tom
 
 ## approvals
 
-当前 CLI/TUI pipeline 支持运行时 `--auto-approve` / `Ctrl+R` 自动接受规划节点并记录审批事件。以下配置字段已支持解析和校验；更细粒度的按审批类型自动批准、审批 UI 和审批聊天仍属于后续 workflow/TUI 集成目标。
+当前 CLI/TUI pipeline 支持运行时 `--auto-approve` / `Ctrl+R` 自动接受规划节点并记录审批事件到 SQLite 和 JSONL。以下配置字段已支持解析和校验；更细粒度的按审批类型自动批准、审批 UI 和审批聊天仍属于后续 workflow/TUI 集成目标。
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -51,8 +51,8 @@ Inklink 从 `config.toml` 读取配置，示例见仓库根目录的 `config.tom
 
 | key | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `cold_start.enabled` | bool | `false` | 是否启用历史章节冷启动分析。当前完整冷启动工作流属于后续集成目标。 |
-| `cold_start.recent_chapters_to_deep_analyze` | 非负整数 | `50` | 冷启动开启时，最近多少章按 deep 分析；更早章节可按 shallow 分析。 |
+| `cold_start.enabled` | bool | `false` | 是否启用历史章节冷启动分析。开启后 pipeline 会把较早章节标记为 `shallow` 分析，最近章节标记为 `deep`。 |
+| `cold_start.recent_chapters_to_deep_analyze` | 非负整数 | `50` | 冷启动开启时，最近多少章按 deep 分析；更早章节按 shallow 分析。shallow/deep 差异通过 prompt 输入传给模型，结构化字段仍要求尽量完整。 |
 
 ## models
 

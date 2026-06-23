@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
+from inklink.domain.index import EntityMention
+from inklink.llm.types import NormalizedUsage
 from inklink.storage.events import JsonlEventLog
 from inklink.storage.schema import SCHEMA_VERSION
 from inklink.storage.sqlite import StateStore, UnsupportedSchemaError
@@ -129,6 +131,11 @@ def test_state_store_records_run_and_nodes(tmp_path: Path) -> None:
             "node_id": "n1",
             "node_type": "load_project",
             "status": "pending",
+            "attempt": 0,
+            "idempotency_key": None,
+            "input_version": None,
+            "output_version": None,
+            "error_summary": None,
         }
 
 
@@ -141,6 +148,11 @@ def test_state_store_upsert_node_updates_existing_row(tmp_path: Path) -> None:
             "node_id": "n1",
             "node_type": "draft_scene",
             "status": "complete",
+            "attempt": 0,
+            "idempotency_key": None,
+            "input_version": None,
+            "output_version": None,
+            "error_summary": None,
         }
 
 
@@ -150,6 +162,105 @@ def test_state_store_raises_key_error_for_missing_records(tmp_path: Path) -> Non
             store.get_run("run-missing")
         with pytest.raises(KeyError, match="node-missing"):
             store.get_node("node-missing")
+
+
+def test_state_store_records_llm_tool_cache_and_usage(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        store.create_run(runtime_id="run-1", input_dir="/novel", status="running")
+        call_id = store.create_llm_call(
+            runtime_id="run-1",
+            idempotency_key="key-1",
+            task_type="drafting",
+            profile="default",
+            api_type="responses",
+            model="gpt-test",
+            attempt=1,
+            request={"prompt": "写一章"},
+        )
+        tool_id = store.record_tool_call(
+            llm_call_id=call_id,
+            idempotency_key="key-1",
+            name="submit_scene_draft",
+            arguments={"scene_id": "s1", "text": "正文"},
+            result={"ok": True},
+            call_id="call-1",
+        )
+        store.complete_llm_call(
+            call_id=call_id,
+            request_id="req-1",
+            response={"ok": True},
+            usage=NormalizedUsage(input_tokens=3, output_tokens=4, total_tokens=7),
+        )
+
+        cached = store.get_successful_tool_payload(
+            idempotency_key="key-1",
+            tool_name="submit_scene_draft",
+        )
+
+        assert tool_id > 0
+        assert cached == {"scene_id": "s1", "text": "正文"}
+        assert store.next_llm_attempt("key-1") == 2
+        usage_rows = store.usage_summary()
+        assert usage_rows[0]["profile"] == "default"
+        assert usage_rows[0]["model"] == "gpt-test"
+
+
+def test_state_store_artifacts_version_and_approval_messages(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        first_version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"outline": "初稿"},
+            is_draft=True,
+        )
+        second_version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"outline": "定稿"},
+            is_approved=True,
+        )
+        store.create_or_update_approval(
+            approval_id="outline",
+            approval_type="outline",
+            status="waiting",
+            auto_approve=False,
+            artifact_id="outline",
+            artifact_version=first_version,
+        )
+        before = store.approval_messages_hash("outline")
+        store.add_message(
+            message_id="msg-1",
+            approval_id="outline",
+            role="user",
+            content="改得更紧凑",
+        )
+        after = store.approval_messages_hash("outline")
+
+        latest = store.get_latest_artifact("outline")
+
+        assert first_version == 1
+        assert second_version == 2
+        assert latest is not None
+        assert latest["version"] == 2
+        assert latest["payload"] == {"outline": "定稿"}
+        assert before != after
+
+
+def test_state_store_generation_abandon_rebuilds_story_index(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        store.upsert_entity_mentions(
+            [
+                EntityMention(entity_id="林青", chapter_number=3, generation=1, strength=5),
+                EntityMention(entity_id="林青", chapter_number=3, generation=2, strength=1),
+            ],
+            source="test",
+        )
+
+        next_generation = store.increment_chapter_generation(3)
+        index = store.load_story_index()
+
+        assert next_generation == 2
+        assert index.characters["林青"].active_score == 1
 
 
 def test_state_store_close_releases_connection(tmp_path: Path) -> None:
@@ -216,10 +327,30 @@ def test_state_store_enforces_foreign_keys(tmp_path: Path) -> None:
     ):
         store._connection.execute(
             """
-            INSERT INTO llm_calls(runtime_id, task_type, model, usage_json)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO llm_calls(
+              runtime_id,
+              idempotency_key,
+              task_type,
+              profile,
+              api_type,
+              model,
+              status,
+              attempt,
+              request_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("missing-run", "drafting", "gpt-test", "{}"),
+            (
+                "missing-run",
+                "key",
+                "drafting",
+                "default",
+                "responses",
+                "gpt-test",
+                "running",
+                1,
+                "{}",
+            ),
         )
 
 
@@ -233,26 +364,52 @@ def test_state_store_fresh_database_foreign_keys_remain_enforced(tmp_path: Path)
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
             store._connection.execute(
                 """
-                INSERT INTO llm_calls(runtime_id, task_type, model, usage_json)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO llm_calls(
+                  runtime_id,
+                  idempotency_key,
+                  task_type,
+                  profile,
+                  api_type,
+                  model,
+                  status,
+                  attempt,
+                  request_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                ("missing-run", "drafting", "gpt-test", "{}"),
+                (
+                    "missing-run",
+                    "key",
+                    "drafting",
+                    "default",
+                    "responses",
+                    "gpt-test",
+                    "running",
+                    1,
+                    "{}",
+                ),
             )
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
             store._connection.execute(
                 """
-                INSERT INTO tool_calls(llm_call_id, name, arguments_json, result_json)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO tool_calls(
+                  llm_call_id,
+                  idempotency_key,
+                  name,
+                  arguments_json,
+                  result_json
+                )
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (1, "tool", "{}", "{}"),
+                (1, "key", "tool", "{}", "{}"),
             )
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
             store._connection.execute(
                 """
-                INSERT INTO messages(message_id, approval_id, role, content)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO messages(message_id, approval_id, role, content, content_hash)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                ("message-1", "missing-approval", "assistant", "content"),
+                ("message-1", "missing-approval", "assistant", "content", "hash"),
             )
 
 

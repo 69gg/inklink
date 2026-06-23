@@ -54,17 +54,17 @@ class SetupWorkspace(Widget):
         with Horizontal(classes="workspace-row"):
             with Vertical(classes="workspace-panel"):
                 yield Static("状态", classes="workspace-title")
-                yield Static("当前仅展示 TUI shell。")
+                yield Static(self.status_text, id="setup-status")
             with Vertical(classes="workspace-panel"):
                 yield Static("运行摘要", classes="workspace-title")
-                yield Static("暂无运行记录。")
+                yield Static("未开始。Ctrl+R 可按当前参数执行一次续写。")
         with Horizontal(classes="workspace-row"):
             with Vertical(classes="workspace-panel"):
                 yield Static("配置", classes="workspace-title")
                 yield Static(f"配置文件: {config_text}")
             with Vertical(classes="workspace-panel"):
                 yield Static("审批区", classes="workspace-title")
-                yield Static("暂无待审批事项。")
+                yield Static("规划、章节计划、场景计划会记录审批事件；完整聊天审批仍在开发中。")
 
     @property
     def workspace_text(self) -> str:
@@ -72,10 +72,16 @@ class SetupWorkspace(Widget):
         config_text = str(self._config) if self._config is not None else "config.toml"
         return f"设置工作台\n输入目录: {input_dir_text}\n配置: {config_text}\n状态: {self._status}"
 
+    @property
+    def status_text(self) -> str:
+        return f"当前状态: {self._status}\n快捷键: F1 工作台，Ctrl+R 开始续写"
+
     def set_status(self, status: str) -> None:
         self._status = status
         workspace = self.query_one("#setup-workspace", Static)
         workspace.update(self.workspace_text)
+        status_panel = self.query_one("#setup-status", Static)
+        status_panel.update(self.status_text)
 
 
 class DashboardScreen(Screen[None]):
@@ -127,15 +133,17 @@ class DashboardScreen(Screen[None]):
         with Horizontal(classes="dashboard-row"):
             with Vertical(classes="dashboard-panel"):
                 yield Static("状态", classes="dashboard-title")
-                yield Static("服务未连接。")
+                yield Static(
+                    "同进程 workflow service；运行状态保存在 logs/<runtime_id>/state.sqlite。"
+                )
             with Vertical(classes="dashboard-panel"):
                 yield Static("运行摘要", classes="dashboard-title")
-                yield Static("等待后续 workflow 集成。")
+                yield Static("Ctrl+R 从主屏启动；CLI 可用 --execute 或 --resume-runtime-id。")
         with Horizontal(classes="dashboard-row"):
             with Vertical(classes="dashboard-panel"):
                 yield Static("输入目录", classes="dashboard-title")
                 yield Static(input_dir_text)
             with Vertical(classes="dashboard-panel"):
                 yield Static("审批区", classes="dashboard-title")
-                yield Static("暂无待审批事项。")
+                yield Static("当前版本记录审批事件；完整 artifact diff 和聊天面板后续接入。")
         yield Footer()
