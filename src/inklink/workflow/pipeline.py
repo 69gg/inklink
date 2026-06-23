@@ -353,24 +353,26 @@ class InklinkPipeline:
     ) -> None:
         if self._progress_callback is None:
             return
-        self._progress_callback(
-            PipelineProgress(
-                message=message,
-                runtime_id=runtime_id,
-                node_id=node_id,
-                chapter_number=chapter_number,
-                phase=phase,
-                status=status,
-                step_index=step_index,
-                step_total=step_total,
-                chapter_done=chapter_done,
-                chapter_total=chapter_total,
-                llm_task_type=llm_task_type,
-                llm_profile=llm_profile,
-                waiting_approval_id=waiting_approval_id,
-                severity=severity,
-            )
+        progress = PipelineProgress(
+            message=message,
+            runtime_id=runtime_id,
+            node_id=node_id,
+            chapter_number=chapter_number,
+            phase=phase,
+            status=status,
+            step_index=step_index,
+            step_total=step_total,
+            chapter_done=chapter_done,
+            chapter_total=chapter_total,
+            llm_task_type=llm_task_type,
+            llm_profile=llm_profile,
+            waiting_approval_id=waiting_approval_id,
+            severity=severity,
         )
+        try:
+            self._progress_callback(progress)
+        except Exception:
+            return
 
     async def update_artifact_with_chat(
         self,

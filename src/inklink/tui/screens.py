@@ -10,7 +10,9 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Button, Footer, Header, Input, Static, TextArea
+from textual.visual import VisualType
+from textual.widgets import Button, Footer, Header, Input, TextArea
+from textual.widgets import Static as TextualStatic
 
 from inklink.config import api_key_for_profile, load_config
 from inklink.tui.snapshot import RunSnapshot, latest_event_payload, load_run_snapshot
@@ -21,6 +23,33 @@ if TYPE_CHECKING:
 
 DEFAULT_EVENT_LIMIT = 20
 OUTPUT_MODES = {"output", "writeback"}
+
+
+class Static(TextualStatic):
+    """Project default Static widget: render strings as plain text, not Rich markup."""
+
+    def __init__(
+        self,
+        content: VisualType = "",
+        *,
+        expand: bool = False,
+        shrink: bool = False,
+        markup: bool = False,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(
+            content,
+            expand=expand,
+            shrink=shrink,
+            markup=markup,
+            name=name,
+            id=id,
+            classes=classes,
+            disabled=disabled,
+        )
 
 
 class ScreenBody(VerticalScroll):

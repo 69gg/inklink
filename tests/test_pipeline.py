@@ -543,6 +543,36 @@ async def test_pipeline_retries_invalid_tool_payload(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pipeline_ignores_progress_callback_errors(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    write_chapter(novel / "2.txt", "第二章", "青灯在雨夜亮起。")
+    config = tmp_path / "config.toml"
+    write_config_with_planning_auto_approval(config)
+
+    def broken_progress_callback(progress: object) -> None:
+        raise RuntimeError(f"ui failed while rendering {progress}")
+
+    summary = await InklinkPipeline(
+        llm=FakeToolLLM(),
+        progress_callback=broken_progress_callback,
+    ).run(
+        GenerationOptions(
+            input_dir=novel,
+            config_path=config,
+            log_root=tmp_path / "logs",
+            chapter_count=1,
+            min_chars=8,
+            max_chars=80,
+        )
+    )
+
+    assert summary.status == "completed"
+    assert summary.generated_chapters == [3]
+
+
+@pytest.mark.asyncio
 async def test_pipeline_marks_run_failed_when_tool_payload_retries_exhaust(
     tmp_path: Path,
 ) -> None:

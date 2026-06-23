@@ -728,6 +728,51 @@ def test_service_recent_events_skips_malformed_lines(tmp_path: Path) -> None:
     assert all(event.get("event_type") != "partial" for event in events)
 
 
+def test_service_recent_events_reads_tail_of_large_log(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        run = service.start_run(project)
+        events_path = run.log_dir / "events.jsonl"
+        with events_path.open("a", encoding="utf-8") as handle:
+            for index in range(80):
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": f"old-{index}",
+                            "event_type": "old_event",
+                            "payload": {"index": index, "text": "x" * 2048},
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            handle.write('{"timestamp":"bad","event_type":"partial","payload":{"text":"')
+            handle.write("\n")
+            for index in range(3):
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": f"new-{index}",
+                            "event_type": f"new_event_{index}",
+                            "payload": {"runtime_id": run.runtime_id},
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+
+        events = service.recent_events(limit=3)
+
+    assert [event["event_type"] for event in events] == [
+        "new_event_0",
+        "new_event_1",
+        "new_event_2",
+    ]
+
+
 def test_service_chapter_commands_allow_generated_chapter_numbers(tmp_path: Path) -> None:
     project = tmp_path / "novel"
     project.mkdir()

@@ -494,15 +494,7 @@ class WorkflowService:
         path = self._current_run().run.log_dir / "events.jsonl"
         if not path.exists():
             return []
-        events: list[dict[str, object]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
-                events.append(event)
-        return events[-limit:]
+        return _read_recent_jsonl_events(path, limit=limit)
 
     def close(self) -> None:
         first_error: BaseException | None = None
@@ -543,6 +535,46 @@ class WorkflowService:
     def _validate_chapter_number(self, chapter_number: int) -> None:
         if chapter_number <= 0:
             raise ValueError("chapter_number must be positive")
+
+
+def _read_recent_jsonl_events(path: Path, *, limit: int) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for line in reversed(_tail_jsonl_lines(path, target_lines=max(limit * 4, limit + 10))):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+        if len(events) >= limit:
+            break
+    events.reverse()
+    return events
+
+
+def _tail_jsonl_lines(
+    path: Path,
+    *,
+    target_lines: int,
+    chunk_size: int = 64 * 1024,
+    max_bytes: int = 2 * 1024 * 1024,
+) -> list[str]:
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        position = handle.tell()
+        data = b""
+        while position > 0 and data.count(b"\n") <= target_lines and len(data) < max_bytes:
+            read_size = min(chunk_size, position, max_bytes - len(data))
+            if read_size <= 0:
+                break
+            position -= read_size
+            handle.seek(position)
+            data = handle.read(read_size) + data
+    text = data.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if position > 0 and lines:
+        lines = lines[1:]
+    return lines[-target_lines:]
 
 
 def _validate_non_blank_identifier(field_name: str, value: str) -> None:

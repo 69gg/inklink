@@ -1,8 +1,10 @@
 import asyncio
 
+from rich.console import Console
 from textual.widgets import Button, Input, Static, TextArea
 
 from inklink.storage.sqlite import StateStore
+from inklink.tui import screens as tui_screens
 from inklink.tui.app import InklinkApp
 from inklink.tui.screens import (
     DashboardScreen,
@@ -34,6 +36,22 @@ async def test_tui_initial_interface_contains_workspace_text() -> None:
         body_text = pilot.app.screen.query_one("#setup-workspace", Static).render()
 
     assert "输入目录" in str(body_text)
+
+
+def test_tui_static_renders_dynamic_text_without_markup_parsing() -> None:
+    text = (
+        "1 validation error\n"
+        "field\n"
+        "  Input should be a valid string "
+        "[type=string_type, input_value={'a': 1}, input_type=dict]"
+    )
+    console = Console(record=True, width=240)
+
+    console.print(tui_screens.Static(text).render())
+
+    rendered = console.export_text()
+    assert "[type=string_type" in rendered
+    assert "input_value={'a': 1}" in rendered
 
 
 async def test_tui_initial_interface_contains_generation_controls() -> None:

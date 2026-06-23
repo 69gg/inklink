@@ -44,6 +44,8 @@ load_project
 
 若模型返回了不可解析的 tool 参数 JSON、未调用期望工具或返回不符合 schema 的结构，pipeline 会按对应 model profile 的 `max_retries` 自动重试。重试耗尽后会把当前 LLM call 和正在执行的节点标为 `failed`，写入 `run_failed` 事件，并把 `run_summary.json` 与 SQLite run 状态更新为 `failed`；TUI 重启后也会从持久化摘要中显示失败原因。
 
+TUI 的进度回调是观察者，不参与核心 workflow 成败判定；即使界面渲染临时异常，也不会反向打断 pipeline。大规模运行时，TUI 会节流 SQLite snapshot 刷新和界面重绘，`events.jsonl` 只从文件尾部读取最近事件，避免 1000+ 章分析时因反复全量读取状态和大日志造成卡顿。所有动态错误文本按纯文本渲染，不解析 Rich markup。
+
 启动任务时的输入目录、配置文件、输出模式、章节数、起始章节、字数区间、修订轮数、自动批准默认值和 notes 会保存为 `run_settings` artifact，并同步到 SQLite `runs.settings_json`。notes 是额外约束，会进入故事合并、大纲、章节计划、场景计划、正文、review 和 revision 的模型输入；但正文中已有章节仍是世界观和设定推断的主要来源。恢复同一 runtime 时默认复用保存的创作参数，避免用户重启 TUI 后丢失 notes 或误改字数范围；本次 resume 的 `--auto-approve` 可临时放行后续审批点。
 
 ## auto-approve

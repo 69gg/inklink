@@ -1,6 +1,6 @@
-import json
 import os
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 
@@ -26,6 +26,10 @@ from inklink.workflow.pipeline import (
     OpenAIToolLLM,
     PipelineProgress,
 )
+
+SNAPSHOT_REFRESH_INTERVAL_SECONDS = 1.0
+SETUP_PROGRESS_UPDATE_INTERVAL_SECONDS = 0.25
+VISIBLE_REFRESH_INTERVAL_SECONDS = 0.2
 
 
 class InklinkApp(App[None]):
@@ -59,6 +63,9 @@ class InklinkApp(App[None]):
         self._snapshot: RunSnapshot | None = None
         self._last_error: str | None = None
         self._last_auto_navigation_target: str | None = None
+        self._last_snapshot_refresh_at: float | None = None
+        self._last_setup_update_at: float | None = None
+        self._last_visible_refresh_at: float | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -216,7 +223,7 @@ class InklinkApp(App[None]):
             if setup is not None:
                 setup.set_status(f"运行失败: {exc}")
                 setup.set_run_summary(f"运行失败\n当前阶段: {self._latest_progress}\n错误: {exc}")
-            self._refresh_runtime_snapshot()
+            self._refresh_runtime_snapshot(force=True, redraw_force=True)
             self._auto_navigate_to(DashboardScreen)
             return
         self._pipeline_running = False
@@ -245,7 +252,7 @@ class InklinkApp(App[None]):
                 f"运行完成/运行结束: {summary.runtime_id}，状态 {summary.status}，"
                 f"生成 {len(summary.generated_chapters)} 章，调用 {summary.stats.total_calls} 次"
             )
-        self._refresh_runtime_snapshot()
+        self._refresh_runtime_snapshot(force=True, redraw_force=True)
         if summary.status in {"waiting_approval", "waiting_write_output"}:
             self._auto_navigate_to(
                 RuntimeApprovalsScreen, waiting_approval_id=summary.waiting_approval_id
@@ -271,10 +278,11 @@ class InklinkApp(App[None]):
         self.push_screen(factory())
 
     def _handle_pipeline_progress(self, progress: PipelineProgress) -> None:
+        now = monotonic()
         if progress.runtime_id is not None:
             self.latest_runtime_id = progress.runtime_id
         self._latest_progress_obj = progress
-        self._last_progress_at = monotonic()
+        self._last_progress_at = now
         details = [progress.message]
         if progress.node_id is not None:
             details.append(f"节点: {progress.node_id}")
@@ -288,16 +296,29 @@ class InklinkApp(App[None]):
             details.append(f"模型任务: {progress.llm_task_type}")
         self._latest_progress = "；".join(details)
         setup = self._setup_or_none()
-        if setup is not None:
+        is_critical_progress = progress.waiting_approval_id is not None or progress.status in {
+            "waiting",
+            "failed",
+            "completed",
+        }
+        should_update_setup = (
+            is_critical_progress
+            or self._last_setup_update_at is None
+            or now - self._last_setup_update_at >= SETUP_PROGRESS_UPDATE_INTERVAL_SECONDS
+        )
+        if setup is not None and should_update_setup:
             setup.set_status(f"运行中: {self._latest_progress}")
             setup.set_run_summary(
                 _progress_summary(
                     progress=progress,
                     fallback_runtime_id=self.latest_runtime_id,
-                    log_root=self.log_root,
                 )
             )
-        self._refresh_runtime_snapshot()
+            self._last_setup_update_at = now
+        self._refresh_runtime_snapshot(
+            force=is_critical_progress,
+            redraw_force=is_critical_progress,
+        )
         if progress.waiting_approval_id is not None or progress.status == "waiting":
             self._auto_navigate_to(
                 RuntimeApprovalsScreen,
@@ -306,8 +327,29 @@ class InklinkApp(App[None]):
         elif progress.status == "failed":
             self._auto_navigate_to(DashboardScreen)
 
-    def _refresh_runtime_snapshot(self) -> None:
+    def _refresh_runtime_snapshot(
+        self,
+        *,
+        force: bool = False,
+        redraw_force: bool = False,
+    ) -> None:
+        now = monotonic()
         age = None if self._last_progress_at is None else monotonic() - self._last_progress_at
+        if (
+            not force
+            and self._snapshot is not None
+            and self._last_snapshot_refresh_at is not None
+            and now - self._last_snapshot_refresh_at < SNAPSHOT_REFRESH_INTERVAL_SECONDS
+        ):
+            self._snapshot = replace(
+                self._snapshot,
+                latest_progress=self._latest_progress_obj,
+                pipeline_running=self._pipeline_running,
+                last_progress_age_seconds=age,
+                error=self._last_error,
+            )
+            self._refresh_visible_screen(force=redraw_force)
+            return
         self._snapshot = load_run_snapshot(
             log_root=self.log_root,
             runtime_id=self.latest_runtime_id,
@@ -316,9 +358,22 @@ class InklinkApp(App[None]):
             last_progress_age_seconds=age,
             error=self._last_error,
         )
-        self._refresh_visible_screen()
+        self._last_snapshot_refresh_at = now
+        self._refresh_visible_screen(force=redraw_force)
 
-    def _refresh_visible_screen(self, *, prefill_approval: bool = False) -> None:
+    def _refresh_visible_screen(
+        self,
+        *,
+        prefill_approval: bool = False,
+        force: bool = True,
+    ) -> None:
+        now = monotonic()
+        if (
+            not force
+            and self._last_visible_refresh_at is not None
+            and now - self._last_visible_refresh_at < VISIBLE_REFRESH_INTERVAL_SECONDS
+        ):
+            return
         snapshot = self._snapshot
         if snapshot is None:
             snapshot = load_run_snapshot(
@@ -332,6 +387,7 @@ class InklinkApp(App[None]):
                 error=self._last_error,
             )
             self._snapshot = snapshot
+            self._last_snapshot_refresh_at = now
         screen = self.screen
         if isinstance(screen, DashboardScreen):
             screen.refresh_from_snapshot(snapshot)
@@ -342,6 +398,7 @@ class InklinkApp(App[None]):
             )
         elif isinstance(screen, StatsScreen | RuntimeArtifactsScreen | RuntimeLogScreen):
             screen.refresh_from_snapshot(snapshot)
+        self._last_visible_refresh_at = now
 
     def _auto_navigate_to(
         self,
@@ -411,7 +468,6 @@ def _progress_summary(
     *,
     progress: PipelineProgress,
     fallback_runtime_id: str | None,
-    log_root: Path,
 ) -> str:
     runtime_id = progress.runtime_id or fallback_runtime_id
     lines = [
@@ -423,41 +479,4 @@ def _progress_summary(
         lines.append(f"节点: {progress.node_id}")
     if progress.chapter_number is not None:
         lines.append(f"章节: {progress.chapter_number}")
-    event_lines = _recent_event_lines(log_root, runtime_id)
-    if event_lines:
-        lines.append("最近事件:")
-        lines.extend(event_lines)
     return "\n".join(lines)
-
-
-def _recent_event_lines(log_root: Path, runtime_id: str | None, *, limit: int = 5) -> list[str]:
-    if runtime_id is None:
-        return []
-    path = log_root / runtime_id / "events.jsonl"
-    if not path.exists():
-        return []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    events: list[str] = []
-    for line in lines[-limit:]:
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        event_type = str(parsed.get("event_type") or "event")
-        payload = parsed.get("payload")
-        suffix = _event_suffix(payload)
-        events.append(f"- {event_type}{suffix}")
-    return events
-
-
-def _event_suffix(payload: object) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    parts: list[str] = []
-    for key in ("task_type", "node_id", "chapter_number", "approval_id", "tool_name"):
-        value = payload.get(key)
-        if isinstance(value, str | int):
-            parts.append(f"{key}={value}")
-    return f" ({', '.join(parts)})" if parts else ""
