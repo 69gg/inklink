@@ -40,13 +40,17 @@ load_project
 
 审批聊天每轮消息都会入库、参与幂等键，并在 `chat-update` 时作为完整会话历史交给对应 `update_*` 工具。AI 更新产物后会把 change summary 写回审批消息，避免后续轮次只看到最后一句用户意见。
 
-当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 首页可填写运行参数并启动或恢复 runtime；启动后会自动进入工作台，持续刷新当前阶段、节点、章节、LLM 任务、最近事件和用量统计，并在长时间无新进度时提示可能正在等待模型、限流或 IO。进入审批点或 writeback 冲突时，TUI 会自动切到 F4 审批页并预填审批 ID、产物 ID、类型、版本和相关章节号；如果用户正在审批页输入消息，界面只刷新状态，不覆盖表单。F4 屏幕会直接预览当前等待审批的 artifact 内容，可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节；F3 屏幕可输入 artifact ID 查看内容，也可输入 artifact ID 与两个版本号查看 JSON/unified diff。
+当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。WebUI 可填写运行参数并启动或恢复 runtime；启动后工作台会持续刷新当前阶段、节点、章节、LLM 任务、最近事件和用量统计，并在长时间无新进度时提示可能正在等待模型、限流或 IO。进入审批点或 writeback 冲突时，WebUI 右侧审批区会预填审批 ID、产物 ID、类型、版本和相关章节号，并直接预览当前 artifact 内容；用户可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节。
 
-若模型返回了不可解析的 tool 参数 JSON、未调用期望工具或返回不符合 schema 的结构，pipeline 会按对应 model profile 的 `max_retries` 自动重试。重试耗尽后会把当前 LLM call 和正在执行的节点标为 `failed`，写入 `run_failed` 事件，并把 `run_summary.json` 与 SQLite run 状态更新为 `failed`；TUI 重启后也会从持久化摘要中显示失败原因。
+若模型返回了不可解析的 tool 参数 JSON、未调用期望工具或返回不符合 schema 的结构，pipeline 会按对应 model profile 的 `max_retries` 自动重试。重试耗尽后会把当前 LLM call 和正在执行的节点标为 `failed`，写入 `run_failed` 事件，并把 `run_summary.json` 与 SQLite run 状态更新为 `failed`；WebUI 或 CLI 查询都会从持久化摘要中显示失败原因。
 
-TUI 的进度回调是观察者，不参与核心 workflow 成败判定；即使界面渲染临时异常，也不会反向打断 pipeline。大规模运行时，TUI 会节流 SQLite snapshot 刷新和界面重绘，`events.jsonl` 只从文件尾部读取最近事件，避免 1000+ 章分析时因反复全量读取状态和大日志造成卡顿。所有动态错误文本按纯文本渲染，不解析 Rich markup。
+WebUI 的进度回调是观察者，不参与核心 workflow 成败判定；即使浏览器断开，也不会反向打断 pipeline。大规模运行时，Web API 会节流实时推送并从 `events.jsonl` 文件尾部读取最近事件，避免 1000+ 章分析时因反复全量读取状态和大日志造成卡顿。前端通过 WebSocket 接收进度，并保留轮询兜底。
 
-启动任务时的输入目录、配置文件、输出模式、章节数、起始章节、字数区间、修订轮数、自动批准默认值和 notes 会保存为 `run_settings` artifact，并同步到 SQLite `runs.settings_json`。notes 是额外约束，会进入故事合并、大纲、章节计划、场景计划、正文、review 和 revision 的模型输入；但正文中已有章节仍是世界观和设定推断的主要来源。恢复同一 runtime 时默认复用保存的创作参数，避免用户重启 TUI 后丢失 notes 或误改字数范围；本次 resume 的 `--auto-approve` 可临时放行后续审批点。
+启动任务时的输入目录、配置文件、输出模式、续写模式、章节数或结局章节区间、起始章节、字数区间、修订轮数、自动批准默认值、notes 和 notes 文件路径会保存为 `run_settings` artifact，并同步到 SQLite `runs.settings_json`。notes 是额外约束，会进入故事合并、大纲、章节计划、场景计划、正文、review 和 revision 的模型输入；但正文中已有章节仍是世界观和设定推断的主要来源。恢复同一 runtime 时默认复用保存的创作参数，避免用户重启 WebUI 后丢失 notes 或误改字数范围；本次 resume 的 `--auto-approve` 可临时放行后续审批点。
+
+`to_ending` 续写模式会把 `ending_min_chapters` 和 `ending_max_chapters` 传给大纲与章节计划节点。章节计划必须在该区间内给出完整结局，最后一章标记为 `is_final_chapter`，且同一计划内章节标题不得重复；模型少返回章节或重复标题时不再复制最后一章合同，而是明确失败等待用户处理。
+
+创作产物还会经过默认禁用词检查。`writing.banned_generation_terms` 默认包含 `墨连`、`Inklink` 和 `水印`，用于阻断工具名或水印进入大纲、计划、标题或正文。
 
 ## auto-approve
 
@@ -118,8 +122,8 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 - 运行中生成章节会反哺结构化索引，并刷新所在区间摘要；刷新时会把窗口内已存在的原章节和已生成章节一起交给 `summarize_range`，避免同一窗口的摘要只剩最后一章。
 - `output` 模式写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`；`writeback` 模式在目标文件已存在时写入 `pending_writeback` 并进入 `waiting_write_output`，目标释放后 resume 会通过目标目录内临时文件原子落盘。
 - `--resume-runtime-id` 会恢复同一 runtime，复用已成功 LLM tool result，并跳过已完成且输出文件仍存在的章节。
-- `run_settings` 会在恢复时优先作为参数来源；CLI/TUI 不需要重新填写 notes、字数范围或输出模式。
+- `run_settings` 会在恢复时优先作为参数来源；CLI/WebUI 不需要重新填写 notes、字数范围、结局章节区间或输出模式。
 - `inklink workflow ...` 子命令可对已有 runtime 执行 info、stats、nodes、artifacts、artifact、approvals、messages、events、message、chat-update、approve、retry、abandon 和 rewrite。查询类命令使用只读 inspect，不会把已完成 run 改回 running。
-- TUI 已提供参数化启动/恢复入口、自动跳转工作台、实时阶段进度、等待提示、审批预填、runtime 状态汇总、审批消息、AI 产物修改、artifact diff、批准、retry、abandon 和 rewrite 控件。
+- WebUI 已提供参数化启动/恢复入口、实时阶段进度、等待提示、审批预填、runtime 状态汇总、审批消息、AI 产物修改、artifact diff、批准、retry、abandon 和 rewrite 控件。
 
-首版保持同进程 TUI/workflow service 边界，不提供后台 daemon。若某章节 generation 已被吸收到区间摘要后才被放弃，结构化索引事实会撤回，但对应区间摘要需要重新生成后才能彻底移除该 generation 的自然语言痕迹。
+首版保持同进程 WebUI/workflow service 边界，不提供独立后台 daemon。若某章节 generation 已被吸收到区间摘要后才被放弃，结构化索引事实会撤回，但对应区间摘要需要重新生成后才能彻底移除该 generation 的自然语言痕迹。

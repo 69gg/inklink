@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from inklink.domain.models import ChapterContract, ChapterPlan
 from inklink.llm.types import NormalizedUsage
+from inklink.workflow import pipeline as pipeline_module
 from inklink.workflow.pipeline import (
     GenerationOptions,
     InklinkPipeline,
@@ -133,26 +135,48 @@ class FakeToolLLM(ToolLLM):
                 "notes": ["保留门后悬念"],
             }
         if tool_name == "propose_chapter_plan":
+            request = json.loads(input_text)
+            constraints = request.get("chapter_plan_constraints")
+            if not isinstance(constraints, dict):
+                constraints = {}
+            start_chapter = int(constraints.get("start_chapter", 3))
+            mode = constraints.get("mode")
+            chapter_count = int(
+                constraints.get(
+                    "ending_min_chapters" if mode == "to_ending" else "chapter_count",
+                    1,
+                )
+            )
             return {
                 "chapters": [
                     {
-                        "chapter_number": 3,
-                        "title": "第三章 青灯",
-                        "summary": "林秋进入密室并发现青灯。",
+                        "chapter_number": start_chapter + offset,
+                        "title": _fake_chapter_title(start_chapter + offset),
+                        "summary": f"林秋进入第{start_chapter + offset}章密室并发现青灯。",
                         "min_chars": 8,
                         "max_chars": 80,
                         "required_characters": ["林秋"],
                         "required_keywords": ["青灯"],
-                        "scene_ids": ["3-1", "3-2"],
+                        "scene_ids": [
+                            f"{start_chapter + offset}-1",
+                            f"{start_chapter + offset}-2",
+                        ],
+                        "is_final_chapter": mode == "to_ending" and offset == chapter_count - 1,
                     }
+                    for offset in range(chapter_count)
                 ]
             }
         if tool_name == "propose_scene_plan":
+            request = json.loads(input_text)
+            contract = request.get("chapter_contract")
+            chapter_number = (
+                int(contract.get("chapter_number", 3)) if isinstance(contract, dict) else 3
+            )
             return {
-                "chapter_number": 3,
+                "chapter_number": chapter_number,
                 "scenes": [
                     {
-                        "scene_id": "3-1",
+                        "scene_id": f"{chapter_number}-1",
                         "goal": "进入密室",
                         "characters": ["林秋"],
                         "required_keywords": ["青灯"],
@@ -160,7 +184,7 @@ class FakeToolLLM(ToolLLM):
                         "max_chars": 40,
                     },
                     {
-                        "scene_id": "3-2",
+                        "scene_id": f"{chapter_number}-2",
                         "goal": "发现钥匙反应",
                         "characters": ["林秋"],
                         "required_keywords": ["旧钥匙"],
@@ -170,17 +194,33 @@ class FakeToolLLM(ToolLLM):
                 ],
             }
         if tool_name == "submit_scene_draft":
-            scene_id = "3-2" if '"scene_id": "3-2"' in input_text else "3-1"
+            request = json.loads(input_text)
+            scene_contract = request.get("scene_contract")
+            scene_id = (
+                str(scene_contract.get("scene_id", "3-1"))
+                if isinstance(scene_contract, dict)
+                else "3-1"
+            )
             text = "短" if self._draft_body == "短" else self._draft_body
-            if scene_id == "3-2" and self._draft_body != "短":
+            if scene_id.endswith("-2") and self._draft_body != "短":
                 text = "林秋握紧旧钥匙，青灯忽然一亮。"
             return {"scene_id": scene_id, "text": text}
         if tool_name == "submit_chapter_review":
             return {"passed": True, "issues": [], "resolved_thread_ids": []}
         if tool_name == "submit_revision":
+            request = json.loads(input_text)
+            contract = request.get("chapter_contract")
+            chapter_number = (
+                int(contract.get("chapter_number", 3)) if isinstance(contract, dict) else 3
+            )
+            title = (
+                str(contract.get("title", "第三章 青灯"))
+                if isinstance(contract, dict)
+                else "第三章 青灯"
+            )
             return {
-                "chapter_number": 3,
-                "title": "第三章 青灯",
+                "chapter_number": chapter_number,
+                "title": title,
                 "body": "林秋推开门，看见青灯亮起，旧钥匙也随之发烫。",
             }
         raise AssertionError(f"unexpected tool: {tool_name}")
@@ -251,6 +291,16 @@ class DetailedUsageLLM(FakeToolLLM):
         )
 
 
+class BannedOutlineLLM(FakeToolLLM):
+    def _payload_for(self, tool_name: str, input_text: str) -> dict[str, object]:
+        if tool_name == "propose_outline":
+            return {
+                "outline": "下一章加入墨连水印。",
+                "notes": [],
+            }
+        return super()._payload_for(tool_name, input_text)
+
+
 class FlakyToolPayloadLLM(FakeToolLLM):
     def __init__(self) -> None:
         super().__init__()
@@ -297,6 +347,11 @@ class AlwaysInvalidToolPayloadLLM(FakeToolLLM):
 
 def write_chapter(path: Path, title: str, body: str) -> None:
     path.write_text(f"title: {title}\n---\n{body}", encoding="utf-8")
+
+
+def _fake_chapter_title(chapter_number: int) -> str:
+    names = {3: "第三章 青灯"}
+    return names.get(chapter_number, f"第{chapter_number}章 青灯")
 
 
 def write_config(path: Path) -> None:
@@ -380,6 +435,73 @@ def test_trim_retrieval_items_keeps_deterministic_priority_order() -> None:
     trimmed = trim_retrieval_items(items, budget_chars=18)
 
     assert [item["text"] for item in trimmed] == ["当前章节合同", "即将回收的伏笔"]
+
+
+def test_generation_options_requires_ending_bounds() -> None:
+    with pytest.raises(ValueError, match="ending_min_chapters"):
+        GenerationOptions(continuation_mode="to_ending")
+
+
+def test_ending_chapter_plan_accepts_range_and_marks_final() -> None:
+    constraints = pipeline_module._ChapterPlanConstraints(
+        mode="to_ending",
+        start_chapter=1001,
+        fixed_chapter_count=5,
+        min_chapters=2,
+        max_chapters=5,
+    )
+    plan = ChapterPlan(
+        chapters=[
+            ChapterContract(
+                chapter_number=1,
+                title="终局一",
+                min_chars=1,
+                max_chars=10,
+            ),
+            ChapterContract(
+                chapter_number=2,
+                title="终局二",
+                min_chars=1,
+                max_chars=10,
+                is_final_chapter=True,
+            ),
+        ]
+    )
+
+    normalized = pipeline_module._normalize_chapter_contracts(
+        plan=plan,
+        constraints=constraints,
+        min_chars=800,
+        max_chars=1800,
+    )
+
+    assert [item.chapter_number for item in normalized] == [1001, 1002]
+    assert normalized[0].is_final_chapter is False
+    assert normalized[1].is_final_chapter is True
+
+
+def test_chapter_plan_rejects_duplicate_titles() -> None:
+    constraints = pipeline_module._ChapterPlanConstraints(
+        mode="fixed",
+        start_chapter=3,
+        fixed_chapter_count=2,
+        min_chapters=2,
+        max_chapters=2,
+    )
+    plan = ChapterPlan(
+        chapters=[
+            ChapterContract(chapter_number=3, title="同名", min_chars=1, max_chars=10),
+            ChapterContract(chapter_number=4, title="同名", min_chars=1, max_chars=10),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="duplicate title"):
+        pipeline_module._normalize_chapter_contracts(
+            plan=plan,
+            constraints=constraints,
+            min_chars=800,
+            max_chars=1800,
+        )
 
 
 @pytest.mark.asyncio
@@ -501,6 +623,27 @@ async def test_pipeline_generates_chapter_outputs_and_stats(tmp_path: Path) -> N
     ]
     assert planning_inputs
     assert "原文片段" in planning_inputs[0]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_blocks_banned_terms_in_creative_outputs(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    write_chapter(novel / "1.txt", "第一章", "林秋得到旧钥匙。")
+    config = tmp_path / "config.toml"
+    write_config(config)
+
+    with pytest.raises(ValueError, match="banned generation terms"):
+        await InklinkPipeline(llm=BannedOutlineLLM()).run(
+            GenerationOptions(
+                input_dir=novel,
+                config_path=config,
+                log_root=tmp_path / "logs",
+                chapter_count=1,
+                min_chars=8,
+                max_chars=80,
+            )
+        )
 
 
 @pytest.mark.asyncio

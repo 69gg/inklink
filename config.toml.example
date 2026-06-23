@@ -27,6 +27,9 @@ story_merge_recent_chapters = 20
 # 连续生成多章时，生成章节跨过区间边界后刷新对应区间摘要。
 refresh_range_summary_after_generation = true
 
+# 生成的大纲、计划、正文中禁止出现这些词。默认避免把工具名或“水印”写进小说。
+banned_generation_terms = ["墨连", "Inklink", "水印"]
+
 [approvals]
 # 默认关闭自动批准，避免用户错过关键规划节点。
 auto_approve_outline = false
@@ -88,8 +91,9 @@ range_summary = "default"
 outline_planning = "default"
 outline_chat = "default"
 chapter_planning = "default"
+chapter_plan_chat = "default"
 scene_planning = "default"
-scene_chat = "default"
+scene_plan_chat = "default"
 drafting = "default"
 review = "default"
 revision = "default"

@@ -5,6 +5,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 dist/
+node_modules/
+web/dist/
+web/node_modules/
+web/*.tsbuildinfo
 *.egg-info/
 config.toml
 logs/

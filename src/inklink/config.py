@@ -27,6 +27,7 @@ class WritingConfig(BaseModel):
     range_summary_chapter_span: int = Field(default=50, gt=0)
     story_merge_recent_chapters: int = Field(default=20, ge=0)
     refresh_range_summary_after_generation: bool = True
+    banned_generation_terms: list[str] = Field(default_factory=lambda: ["墨连", "Inklink", "水印"])
 
 
 class ApprovalConfig(BaseModel):

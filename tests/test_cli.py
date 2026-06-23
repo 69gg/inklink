@@ -6,7 +6,6 @@ from typer.testing import CliRunner
 
 from inklink.cli import app
 from inklink.llm.types import NormalizedUsage
-from inklink.tui.app import InklinkApp
 from inklink.workflow.pipeline import GenerationOptions, PipelineSummary, RunStats, ToolCallResult
 from inklink.workflow.service import WorkflowService
 
@@ -24,34 +23,56 @@ def test_cli_has_run_command() -> None:
     assert result.exit_code == 0
     assert "--config" in result.output
     assert "--execute" in result.output
+    assert "--to-ending" in result.output
 
 
-def test_cli_run_launches_tui(monkeypatch: MonkeyPatch) -> None:
-    run_calls = 0
-    app_inputs: list[tuple[Path | None, Path | None]] = []
+def test_cli_run_launches_webui(monkeypatch: MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
 
-    original_init = InklinkApp.__init__
-
-    def fake_init(
-        self: InklinkApp,
-        input_dir: Path | None = None,
-        config: Path | None = None,
+    def fake_serve_web(
+        *,
+        host: str,
+        port: int,
+        log_root: Path,
+        input_dir: Path | None,
+        config: Path,
     ) -> None:
-        app_inputs.append((input_dir, config))
-        original_init(self, input_dir=input_dir, config=config)
+        captured.update(
+            {
+                "host": host,
+                "port": port,
+                "log_root": log_root,
+                "input_dir": input_dir,
+                "config": config,
+            }
+        )
 
-    def fake_run(self: InklinkApp) -> None:
-        nonlocal run_calls
-        run_calls += 1
+    monkeypatch.setattr("inklink.cli.serve_web", fake_serve_web)
 
-    monkeypatch.setattr(InklinkApp, "__init__", fake_init)
-    monkeypatch.setattr(InklinkApp, "run", fake_run)
-
-    result = runner.invoke(app, ["run", "chapters", "--config", "config.toml"])
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "chapters",
+            "--config",
+            "config.toml",
+            "--log-root",
+            "logs",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+        ],
+    )
 
     assert result.exit_code == 0
-    assert run_calls == 1
-    assert app_inputs == [(Path("chapters"), Path("config.toml"))]
+    assert captured == {
+        "host": "0.0.0.0",
+        "port": 9000,
+        "log_root": Path("logs"),
+        "input_dir": Path("chapters"),
+        "config": Path("config.toml"),
+    }
 
 
 def test_cli_run_execute_invokes_pipeline(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
@@ -137,6 +158,11 @@ api_key_env = "MISSING_FAKE_KEY"
             "80",
             "--max-revision-rounds",
             "4",
+            "--to-ending",
+            "--ending-min-chapters",
+            "3",
+            "--ending-max-chapters",
+            "6",
             "--auto-approve",
             "--notes",
             "保留悬念",
@@ -149,6 +175,9 @@ api_key_env = "MISSING_FAKE_KEY"
     assert isinstance(options, GenerationOptions)
     assert options.input_dir == novel
     assert options.chapter_count == 1
+    assert options.continuation_mode == "to_ending"
+    assert options.ending_min_chapters == 3
+    assert options.ending_max_chapters == 6
     assert options.auto_approve is True
     assert options.runtime_id is None
     assert options.max_revision_rounds == 4

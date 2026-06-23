@@ -1,6 +1,6 @@
 # 开发指南
 
-Inklink 使用 Python 3.12+、`uv`、Typer、Textual、Pydantic v2、OpenAI Python SDK、SQLite、pytest、ruff 和 mypy。
+Inklink 使用 Python 3.12+、`uv`、Typer、FastAPI、React、TypeScript、Vite、Pydantic v2、OpenAI Python SDK、SQLite、pytest、ruff 和 mypy。
 
 ## 环境
 
@@ -9,10 +9,18 @@ uv sync
 uv run inklink version
 ```
 
-启动当前 TUI shell：
+启动当前 WebUI：
 
 ```bash
 uv run inklink run ./novel --config config.toml
+```
+
+前端开发模式：
+
+```bash
+cd web
+npm install
+npm run dev
 ```
 
 直接执行端到端 pipeline：
@@ -58,6 +66,7 @@ uv run ruff format
 uv run ruff check
 uv run mypy
 uv run pytest
+cd web && npm run build
 ```
 
 单测示例：
@@ -81,7 +90,8 @@ uv run pytest tests/test_config.py -q
 | `src/inklink/llm/*` | provider-independent 类型、OpenAI Responses/Chat 适配器、usage 归一化、profile 限流。 |
 | `src/inklink/tools/registry.py` | 内部 function tool schema 与 dispatch 注册。 |
 | `src/inklink/workflow/*` | DAG 节点模型、幂等键、执行器、workflow service 和端到端 pipeline。 |
-| `src/inklink/tui/*` | Textual TUI、运行摘要、产物/审批/事件审计屏和基础审批控件。 |
+| `src/inklink/web/*` | FastAPI WebUI 后端、后台运行 manager、runtime snapshot 和静态前端服务。 |
+| `web/*` | React/TypeScript/Vite 前端工作台。 |
 | `tests/*` | 与上述模块对应的 focused tests。 |
 
 ## 代码约定

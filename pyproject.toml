@@ -1,15 +1,15 @@
 [project]
 name = "inklink"
 version = "0.1.0"
-description = "AI-driven Chinese novel continuation TUI."
+description = "AI-driven Chinese novel continuation tool."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "fastapi>=0.128.0",
   "openai>=2.0.0",
   "pydantic>=2.12.0",
-  "rich>=14.0.0",
-  "textual>=6.0.0",
   "typer>=0.21.0",
+  "uvicorn[standard]>=0.38.0",
 ]
 
 [project.scripts]

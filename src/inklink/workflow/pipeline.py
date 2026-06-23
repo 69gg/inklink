@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
@@ -155,6 +155,9 @@ class OpenAIToolLLM:
         return self._clients[profile_name]
 
 
+ContinuationMode = Literal["fixed", "to_ending"]
+
+
 class GenerationOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -163,7 +166,10 @@ class GenerationOptions(BaseModel):
     log_root: Path = Path("logs")
     output_mode: str | None = None
     runtime_id: str | None = None
+    continuation_mode: ContinuationMode = "fixed"
     chapter_count: int = Field(default=1, gt=0)
+    ending_min_chapters: int | None = Field(default=None, gt=0)
+    ending_max_chapters: int | None = Field(default=None, gt=0)
     start_chapter: int | None = Field(default=None, gt=0)
     min_chars: int = Field(default=800, ge=0)
     max_chars: int = Field(default=1800, ge=0)
@@ -172,6 +178,18 @@ class GenerationOptions(BaseModel):
     notes: str = ""
     notes_path: Path | None = None
 
+    @model_validator(mode="after")
+    def validate_continuation_mode(self) -> Self:
+        if self.continuation_mode == "fixed":
+            return self
+        if self.ending_min_chapters is None or self.ending_max_chapters is None:
+            raise ValueError("ending_min_chapters and ending_max_chapters are required")
+        if self.ending_min_chapters > self.ending_max_chapters:
+            raise ValueError(
+                "ending_min_chapters must be less than or equal to ending_max_chapters"
+            )
+        return self
+
 
 class RunSettings(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
@@ -179,7 +197,10 @@ class RunSettings(BaseModel):
     input_dir: Path
     config_path: Path
     output_mode: str
+    continuation_mode: ContinuationMode = "fixed"
     chapter_count: int = Field(gt=0)
+    ending_min_chapters: int | None = Field(default=None, gt=0)
+    ending_max_chapters: int | None = Field(default=None, gt=0)
     start_chapter: int | None = Field(default=None, gt=0)
     min_chars: int = Field(ge=0)
     max_chars: int = Field(ge=0)
@@ -187,6 +208,18 @@ class RunSettings(BaseModel):
     auto_approve: bool = False
     notes: str = ""
     notes_path: Path | None = None
+
+    @model_validator(mode="after")
+    def validate_continuation_mode(self) -> Self:
+        if self.continuation_mode == "fixed":
+            return self
+        if self.ending_min_chapters is None or self.ending_max_chapters is None:
+            raise ValueError("ending_min_chapters and ending_max_chapters are required")
+        if self.ending_min_chapters > self.ending_max_chapters:
+            raise ValueError(
+                "ending_min_chapters must be less than or equal to ending_max_chapters"
+            )
+        return self
 
 
 class UsageBucket(BaseModel):
@@ -322,6 +355,30 @@ class _ToolSpec:
 class _DraftPackage:
     draft: DraftChapter
     scenes: list[SceneDraft]
+
+
+@dataclass(frozen=True)
+class _ChapterPlanConstraints:
+    mode: ContinuationMode
+    start_chapter: int
+    fixed_chapter_count: int
+    min_chapters: int
+    max_chapters: int
+
+    def model_input(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "start_chapter": self.start_chapter,
+            "chapter_count": self.fixed_chapter_count,
+            "ending_min_chapters": self.min_chapters,
+            "ending_max_chapters": self.max_chapters,
+            "requires_complete_ending": self.mode == "to_ending",
+            "planning_rule": (
+                "生成固定章数的续写计划。"
+                if self.mode == "fixed"
+                else "在最少和最多章节数之间自行确定总章数，最后一章必须是明确完结章。"
+            ),
+        }
 
 
 class InklinkPipeline:
@@ -701,6 +758,10 @@ class InklinkPipeline:
                     chapters=chapters,
                     budget=config.writing.retrieval_token_budget,
                 )
+                chapter_plan_constraints = _chapter_plan_constraints(
+                    settings=settings,
+                    existing_chapter_count=len(chapters),
+                )
 
                 outline_artifact = _approved_artifact_if_accepted(store, "outline", "outline")
                 if outline_artifact is None:
@@ -719,7 +780,9 @@ class InklinkPipeline:
                         input_version=_hash_json(
                             {
                                 "story_state": story_state.model_dump(mode="json"),
-                                "chapter_count": settings.chapter_count,
+                                "chapter_plan_constraints": (
+                                    chapter_plan_constraints.model_input()
+                                ),
                                 "user_notes": settings.notes,
                             }
                         ),
@@ -735,7 +798,7 @@ class InklinkPipeline:
                         input_payload={
                             "story_state": story_state.model_dump(mode="json"),
                             "retrieval_context": retrieval_context,
-                            "chapter_count": settings.chapter_count,
+                            "chapter_plan_constraints": chapter_plan_constraints.model_input(),
                             "user_notes": settings.notes,
                         },
                     )
@@ -795,6 +858,11 @@ class InklinkPipeline:
                         )
                 else:
                     outline = _outline_from_artifact(outline_artifact)
+                    _ensure_generation_payload_allowed(
+                        payload=outline,
+                        config=config,
+                        tool_name="propose_outline",
+                    )
                     store.upsert_node(
                         node_id="approve_outline",
                         node_type="approve_outline",
@@ -833,8 +901,9 @@ class InklinkPipeline:
                         input_version=_hash_json(
                             {
                                 "outline": outline.model_dump(mode="json"),
-                                "start_chapter": settings.start_chapter or len(chapters) + 1,
-                                "chapter_count": settings.chapter_count,
+                                "chapter_plan_constraints": (
+                                    chapter_plan_constraints.model_input()
+                                ),
                                 "min_chars": settings.min_chars,
                                 "max_chars": settings.max_chars,
                                 "user_notes": settings.notes,
@@ -852,8 +921,7 @@ class InklinkPipeline:
                         input_payload={
                             "outline": outline.model_dump(mode="json"),
                             "retrieval_context": retrieval_context,
-                            "start_chapter": settings.start_chapter or len(chapters) + 1,
-                            "chapter_count": settings.chapter_count,
+                            "chapter_plan_constraints": chapter_plan_constraints.model_input(),
                             "min_chars": settings.min_chars,
                             "max_chars": settings.max_chars,
                             "user_notes": settings.notes,
@@ -861,8 +929,7 @@ class InklinkPipeline:
                     )
                     chapter_contracts = _normalize_chapter_contracts(
                         plan=chapter_plan,
-                        start_chapter=settings.start_chapter or len(chapters) + 1,
-                        chapter_count=settings.chapter_count,
+                        constraints=chapter_plan_constraints,
                         min_chars=settings.min_chars,
                         max_chars=settings.max_chars,
                     )
@@ -929,6 +996,11 @@ class InklinkPipeline:
                         )
                 else:
                     chapter_contracts = _chapter_contracts_from_artifact(chapter_plan_artifact)
+                    _ensure_generation_payload_allowed(
+                        payload=ChapterPlan(chapters=chapter_contracts),
+                        config=config,
+                        tool_name="propose_chapter_plan",
+                    )
                     store.upsert_node(
                         node_id="approve_chapter_plan",
                         node_type="approve_chapter_plan",
@@ -1089,6 +1161,11 @@ class InklinkPipeline:
                             )
                     else:
                         scene_plan = ScenePlan.model_validate(scene_plan_artifact["payload"])
+                        _ensure_generation_payload_allowed(
+                            payload=scene_plan,
+                            config=config,
+                            tool_name="propose_scene_plan",
+                        )
                         store.upsert_node(
                             node_id=f"approve_scene_plan:{contract.chapter_number}",
                             node_type="approve_scene_plan",
@@ -2203,6 +2280,11 @@ class InklinkPipeline:
                     schema=tool_spec.schema,
                 )
                 validated = tool_spec.model.model_validate(result.payload)
+                _ensure_generation_payload_allowed(
+                    payload=validated,
+                    config=config,
+                    tool_name=tool_spec.name,
+                )
             except Exception as exc:
                 last_error = exc
                 store.fail_llm_call(call_id=llm_call_id, error=str(exc))
@@ -2423,7 +2505,10 @@ def _settings_for_run(
         input_dir=_required_input_dir(options).resolve(),
         config_path=options.config_path,
         output_mode=options.output_mode or config.runtime.output_mode,
+        continuation_mode=options.continuation_mode,
         chapter_count=options.chapter_count,
+        ending_min_chapters=options.ending_min_chapters,
+        ending_max_chapters=options.ending_max_chapters,
         start_chapter=options.start_chapter,
         min_chars=options.min_chars,
         max_chars=options.max_chars,
@@ -2602,8 +2687,40 @@ def _excerpt(text: str, limit: int = 360) -> str:
 
 def _instructions_for(tool_name: str) -> str:
     return (
-        f"你是墨连的小说续写工作流模型。必须只通过指定工具返回结构化结果，当前工具是 {tool_name}。"
+        f"你是小说续写工作流模型。必须只通过指定工具返回结构化结果，当前工具是 {tool_name}。"
+        "不要在任何小说内容、大纲、计划或标题中加入工具名、产品名、防伪标记或水印。"
     )
+
+
+_CREATIVE_TOOL_NAMES = {
+    "propose_outline",
+    "update_outline",
+    "propose_chapter_plan",
+    "update_chapter_plan",
+    "propose_scene_plan",
+    "update_scene_plan",
+    "submit_scene_draft",
+    "submit_revision",
+}
+
+
+def _ensure_generation_payload_allowed(
+    *,
+    payload: BaseModel,
+    config: AppConfig,
+    tool_name: str,
+) -> None:
+    if tool_name not in _CREATIVE_TOOL_NAMES:
+        return
+    banned_terms = [term for term in config.writing.banned_generation_terms if term.strip()]
+    if not banned_terms:
+        return
+    serialized = json.dumps(payload.model_dump(mode="json"), ensure_ascii=False)
+    matches = sorted({term for term in banned_terms if term in serialized})
+    if matches:
+        raise ValueError(
+            f"{tool_name} output contains banned generation terms: {', '.join(matches)}"
+        )
 
 
 def _json_schema_for(model: type[BaseModel]) -> dict[str, object]:
@@ -2765,16 +2882,34 @@ _TOOL_SPECS: dict[str, _ToolSpec] = {
 def _normalize_chapter_contracts(
     *,
     plan: ChapterPlan | _ChapterPlanTool,
-    start_chapter: int,
-    chapter_count: int,
+    constraints: _ChapterPlanConstraints,
     min_chars: int,
     max_chars: int,
 ) -> list[ChapterContract]:
     contracts = list(plan.chapters)
+    if constraints.mode == "fixed":
+        if len(contracts) != constraints.fixed_chapter_count:
+            raise ValueError(
+                "chapter plan must contain exactly "
+                f"{constraints.fixed_chapter_count} chapters, got {len(contracts)}"
+            )
+    elif not constraints.min_chapters <= len(contracts) <= constraints.max_chapters:
+        raise ValueError(
+            "ending chapter plan must contain between "
+            f"{constraints.min_chapters} and {constraints.max_chapters} chapters, "
+            f"got {len(contracts)}"
+        )
+    if constraints.mode == "to_ending" and not contracts[-1].is_final_chapter:
+        raise ValueError("ending chapter plan must mark the last chapter as is_final_chapter")
+
     normalized: list[ChapterContract] = []
-    for offset in range(chapter_count):
-        expected_number = start_chapter + offset
-        source = contracts[offset] if offset < len(contracts) else contracts[-1]
+    seen_titles: set[str] = set()
+    for offset, source in enumerate(contracts):
+        expected_number = constraints.start_chapter + offset
+        normalized_title = " ".join(source.title.split())
+        if normalized_title in seen_titles:
+            raise ValueError(f"chapter plan contains duplicate title: {normalized_title}")
+        seen_titles.add(normalized_title)
         normalized.append(
             ChapterContract(
                 **{
@@ -2782,10 +2917,38 @@ def _normalize_chapter_contracts(
                     "chapter_number": expected_number,
                     "min_chars": min_chars,
                     "max_chars": max_chars,
+                    "is_final_chapter": (
+                        constraints.mode == "to_ending" and offset == len(contracts) - 1
+                    ),
                 }
             )
         )
     return normalized
+
+
+def _chapter_plan_constraints(
+    *,
+    settings: RunSettings,
+    existing_chapter_count: int,
+) -> _ChapterPlanConstraints:
+    start_chapter = settings.start_chapter or existing_chapter_count + 1
+    if settings.continuation_mode == "fixed":
+        return _ChapterPlanConstraints(
+            mode="fixed",
+            start_chapter=start_chapter,
+            fixed_chapter_count=settings.chapter_count,
+            min_chapters=settings.chapter_count,
+            max_chapters=settings.chapter_count,
+        )
+    if settings.ending_min_chapters is None or settings.ending_max_chapters is None:
+        raise ValueError("ending_min_chapters and ending_max_chapters are required")
+    return _ChapterPlanConstraints(
+        mode="to_ending",
+        start_chapter=start_chapter,
+        fixed_chapter_count=settings.ending_max_chapters,
+        min_chapters=settings.ending_min_chapters,
+        max_chapters=settings.ending_max_chapters,
+    )
 
 
 def _tool_spec_for_artifact_update(artifact_type: str) -> _ToolSpec:

@@ -29,6 +29,7 @@ class ChapterContract(BaseModel):
     required_keywords: list[str] = Field(default_factory=list)
     scene_ids: list[str] = Field(default_factory=list)
     forbidden: list[str] = Field(default_factory=list)
+    is_final_chapter: bool = False
 
     @field_validator("title")
     @classmethod

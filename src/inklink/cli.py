@@ -8,8 +8,9 @@ import typer
 
 from inklink import __version__
 from inklink.config import api_key_for_profile, load_config
-from inklink.tui.app import InklinkApp
+from inklink.web.server import serve_web
 from inklink.workflow.pipeline import (
+    ContinuationMode,
     GenerationOptions,
     InklinkPipeline,
     OpenAIToolLLM,
@@ -18,7 +19,7 @@ from inklink.workflow.pipeline import (
 )
 from inklink.workflow.service import UsageStatRow, WorkflowService
 
-app = typer.Typer(help="墨连 Inklink: AI-driven Chinese novel continuation TUI.")
+app = typer.Typer(help="墨连 Inklink: AI-driven Chinese novel continuation tool.")
 workflow_app = typer.Typer(help="Operate an existing Inklink workflow runtime.")
 app.add_typer(workflow_app, name="workflow")
 
@@ -35,7 +36,7 @@ def run(
     config: Annotated[Path, typer.Option(help="Path to config.toml.")] = Path("config.toml"),
     execute: Annotated[
         bool,
-        typer.Option(help="Run the full continuation workflow instead of opening the TUI shell."),
+        typer.Option(help="Run the full continuation workflow instead of opening the WebUI."),
     ] = False,
     chapter_count: Annotated[int, typer.Option(help="Number of chapters to generate.")] = 1,
     start_chapter: Annotated[
@@ -47,6 +48,18 @@ def run(
     max_revision_rounds: Annotated[
         int | None,
         typer.Option(help="Override maximum automatic revision rounds."),
+    ] = None,
+    to_ending: Annotated[
+        bool,
+        typer.Option(help="Plan enough chapters to reach the ending."),
+    ] = False,
+    ending_min_chapters: Annotated[
+        int | None,
+        typer.Option(help="Minimum chapters when --to-ending is enabled."),
+    ] = None,
+    ending_max_chapters: Annotated[
+        int | None,
+        typer.Option(help="Maximum chapters when --to-ending is enabled."),
     ] = None,
     output_mode: Annotated[
         str | None,
@@ -69,8 +82,16 @@ def run(
         Path | None,
         typer.Option(help="Path to a UTF-8 notes file for this continuation run."),
     ] = None,
+    host: Annotated[str, typer.Option(help="WebUI host when --execute is not used.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="WebUI port when --execute is not used.")] = 8765,
 ) -> None:
-    """Launch the Inklink TUI."""
+    """Launch the Inklink WebUI or execute the workflow once."""
+    continuation_mode: ContinuationMode = "to_ending" if to_ending else "fixed"
+    _validate_ending_options(
+        continuation_mode=continuation_mode,
+        ending_min_chapters=ending_min_chapters,
+        ending_max_chapters=ending_max_chapters,
+    )
     if execute:
         if input_dir is None and resume_runtime_id is None:
             raise typer.BadParameter("input_dir is required when --execute is used")
@@ -81,7 +102,10 @@ def run(
                 log_root=log_root,
                 output_mode=output_mode,
                 runtime_id=resume_runtime_id,
+                continuation_mode=continuation_mode,
                 chapter_count=chapter_count,
+                ending_min_chapters=ending_min_chapters,
+                ending_max_chapters=ending_max_chapters,
                 start_chapter=start_chapter,
                 min_chars=min_chars,
                 max_chars=max_chars,
@@ -100,7 +124,19 @@ def run(
         typer.echo(f"llm_calls: {summary.stats.total_calls}")
         _print_usage_summary(summary)
         return
-    InklinkApp(input_dir=input_dir, config=config).run()
+    serve_web(host=host, port=port, log_root=log_root, input_dir=input_dir, config=config)
+
+
+@app.command("web")
+def web(
+    input_dir: Annotated[Path | None, typer.Argument(help="Chapter directory.")] = None,
+    config: Annotated[Path, typer.Option(help="Path to config.toml.")] = Path("config.toml"),
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+    host: Annotated[str, typer.Option(help="WebUI host.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="WebUI port.")] = 8765,
+) -> None:
+    """Launch the Inklink WebUI."""
+    serve_web(host=host, port=port, log_root=log_root, input_dir=input_dir, config=config)
 
 
 async def _run_pipeline(
@@ -110,7 +146,10 @@ async def _run_pipeline(
     log_root: Path,
     output_mode: str | None,
     runtime_id: str | None,
+    continuation_mode: ContinuationMode,
     chapter_count: int,
+    ending_min_chapters: int | None,
+    ending_max_chapters: int | None,
     start_chapter: int | None,
     min_chars: int,
     max_chars: int,
@@ -133,7 +172,10 @@ async def _run_pipeline(
             log_root=log_root,
             output_mode=output_mode,
             runtime_id=runtime_id,
+            continuation_mode=continuation_mode,
             chapter_count=chapter_count,
+            ending_min_chapters=ending_min_chapters,
+            ending_max_chapters=ending_max_chapters,
             start_chapter=start_chapter,
             min_chars=min_chars,
             max_chars=max_chars,
@@ -143,6 +185,22 @@ async def _run_pipeline(
             notes_path=notes_path,
         )
     )
+
+
+def _validate_ending_options(
+    *,
+    continuation_mode: ContinuationMode,
+    ending_min_chapters: int | None,
+    ending_max_chapters: int | None,
+) -> None:
+    if continuation_mode == "fixed":
+        return
+    if ending_min_chapters is None or ending_max_chapters is None:
+        raise typer.BadParameter(
+            "--to-ending requires --ending-min-chapters and --ending-max-chapters"
+        )
+    if ending_min_chapters > ending_max_chapters:
+        raise typer.BadParameter("--ending-min-chapters must be <= --ending-max-chapters")
 
 
 def _config_path_for_pipeline(*, config: Path, log_root: Path, runtime_id: str | None) -> Path:
