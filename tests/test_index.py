@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from inklink.domain.index import CharacterIndexEntry, EntityMention, StoryIndex
+from inklink.domain.index import CharacterIndexEntry, EntityMention, StoryIndex, StructuredFact
 
 
 def test_last_mentioned_is_order_independent() -> None:
@@ -376,3 +376,34 @@ def test_story_index_json_round_trip_is_stable() -> None:
 
     assert restored == index
     assert restored.model_dump() == index.model_dump()
+
+
+def test_story_index_structured_facts_are_generation_aware_and_retrievable() -> None:
+    index = StoryIndex()
+    index.upsert_facts(
+        [
+            StructuredFact(
+                fact_id="thread-1",
+                kind="plot_thread",
+                text="旧钥匙尚未解释",
+                chapter_number=5,
+                generation=1,
+                priority=2,
+                keywords=["旧钥匙"],
+            ),
+            StructuredFact(
+                fact_id="world-1",
+                kind="worldbuilding",
+                text="青灯会回应钥匙",
+                chapter_number=6,
+                generation=1,
+                priority=4,
+                keywords=["青灯", "旧钥匙"],
+            ),
+        ]
+    )
+
+    index.abandon_generation(chapter_number=5, generation=1)
+    items = index.retrieval_items(keywords=["旧钥匙"])
+
+    assert [item["text"] for item in items] == ["青灯会回应钥匙"]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -15,6 +15,7 @@ from pydantic import (
 type PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 type NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 type GenerationIdentity = tuple[PositiveInt, PositiveInt]
+FactKind = Literal["worldbuilding", "plot_thread", "keyword", "event"]
 
 _GENERATION_IDENTITY_ADAPTER: TypeAdapter[GenerationIdentity] = TypeAdapter(GenerationIdentity)
 
@@ -65,23 +66,52 @@ class CharacterIndexEntry(BaseModel):
         return self
 
 
+class StructuredFact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fact_id: str = Field(min_length=1)
+    kind: FactKind
+    text: str = Field(min_length=1)
+    chapter_number: PositiveInt
+    generation: PositiveInt
+    priority: PositiveInt = 5
+    keywords: list[str] = Field(default_factory=list)
+
+    @field_validator("fact_id", "text")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("keywords")
+    @classmethod
+    def normalize_keywords(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not value.strip():
+                raise ValueError("keyword must not be blank")
+        return sorted(set(values))
+
+
 class StoryIndex(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mentions: list[EntityMention] = Field(default_factory=list)
+    facts: list[StructuredFact] = Field(default_factory=list)
     abandoned_generations: set[GenerationIdentity] = Field(default_factory=set)
     characters: dict[str, CharacterIndexEntry] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
     def ignore_input_characters(cls, data: Any) -> Any:
-        if not isinstance(data, dict) or "characters" not in data:
+        if not isinstance(data, dict):
             return data
         return {key: value for key, value in data.items() if key != "characters"}
 
     @model_validator(mode="after")
     def normalize_and_rebuild(self) -> Self:
         self.mentions = _normalize_mentions(self.mentions)
+        self.facts = _normalize_facts(self.facts)
         self.rebuild()
         return self
 
@@ -93,6 +123,10 @@ class StoryIndex(BaseModel):
 
     def upsert_mentions(self, mentions: list[EntityMention]) -> None:
         self.mentions = _normalize_mentions([*self.mentions, *mentions])
+        self.rebuild()
+
+    def upsert_facts(self, facts: list[StructuredFact]) -> None:
+        self.facts = _normalize_facts([*self.facts, *facts])
         self.rebuild()
 
     def abandon_generation(self, chapter_number: int, generation: int) -> None:
@@ -125,11 +159,74 @@ class StoryIndex(BaseModel):
             if (mention.chapter_number, mention.generation) not in self.abandoned_generations
         ]
 
+    def active_facts(self) -> list[StructuredFact]:
+        return [
+            fact
+            for fact in self.facts
+            if (fact.chapter_number, fact.generation) not in self.abandoned_generations
+        ]
+
+    def retrieval_items(
+        self,
+        *,
+        keywords: list[str] | None = None,
+        max_items: int | None = None,
+    ) -> list[dict[str, object]]:
+        keyword_set = {keyword for keyword in keywords or [] if keyword.strip()}
+        items: list[dict[str, object]] = []
+        for character in self.characters.values():
+            if keyword_set and character.entity_id not in keyword_set:
+                continue
+            items.append(
+                {
+                    "priority": 3,
+                    "kind": "character",
+                    "text": (
+                        f"{character.entity_id}: first={character.first_mentioned_chapter}, "
+                        f"last={character.last_mentioned_chapter}, "
+                        f"score={character.active_score}"
+                    ),
+                }
+            )
+        for fact in self.active_facts():
+            if keyword_set and not keyword_set.intersection({fact.text, *fact.keywords}):
+                continue
+            items.append(
+                {
+                    "priority": fact.priority,
+                    "kind": fact.kind,
+                    "text": fact.text,
+                    "chapter_number": fact.chapter_number,
+                }
+            )
+        items.sort(key=_retrieval_item_sort_key)
+        if max_items is None:
+            return items
+        return items[:max_items]
+
 
 def _mention_identity(mention: EntityMention) -> tuple[str, int, int]:
     return mention.entity_id, mention.chapter_number, mention.generation
 
 
+def _fact_identity(fact: StructuredFact) -> tuple[str, int, int]:
+    return fact.fact_id, fact.chapter_number, fact.generation
+
+
 def _normalize_mentions(mentions: list[EntityMention]) -> list[EntityMention]:
     by_identity = {_mention_identity(mention): mention for mention in mentions}
     return [by_identity[identity] for identity in sorted(by_identity)]
+
+
+def _normalize_facts(facts: list[StructuredFact]) -> list[StructuredFact]:
+    by_identity = {_fact_identity(fact): fact for fact in facts}
+    return [by_identity[identity] for identity in sorted(by_identity)]
+
+
+def _retrieval_item_sort_key(item: dict[str, object]) -> tuple[int, str, str]:
+    priority = item.get("priority")
+    return (
+        priority if isinstance(priority, int) and not isinstance(priority, bool) else 999,
+        str(item.get("kind", "")),
+        str(item.get("text", "")),
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -269,7 +270,10 @@ async def test_pipeline_generates_chapter_outputs_and_stats(tmp_path: Path) -> N
     assert summary.stats.total_calls == len(llm.calls)
     assert summary.stats.by_model["fake-model"].total_tokens == 15 * len(llm.calls)
     assert (summary.log_dir / "artifacts" / "story_state.json").is_file()
-    assert (summary.log_dir / "artifacts" / "story_index.json").is_file()
+    story_index = json.loads(
+        (summary.log_dir / "artifacts" / "story_index.json").read_text(encoding="utf-8")
+    )
+    assert story_index["facts"]
     assert ("drafting", "submit_scene_draft") in llm.calls
     scene_call_indices = [
         index for index, call in enumerate(llm.calls) if call == ("drafting", "submit_scene_draft")
@@ -318,7 +322,7 @@ async def test_pipeline_resume_reuses_successful_calls_and_completed_output(
     assert second.runtime_id == first.runtime_id
     assert second.output_files == first.output_files
     assert second_llm.calls == []
-    assert second.stats.total_calls == 0
+    assert second.stats.total_calls == first.stats.total_calls
 
 
 @pytest.mark.asyncio

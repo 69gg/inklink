@@ -15,7 +15,7 @@ from inklink.atomic import atomic_write_text
 from inklink.chapters import Chapter, load_chapters
 from inklink.config import AppConfig, ModelProfile, load_config
 from inklink.domain.checks import run_chapter_checks
-from inklink.domain.index import EntityMention, StoryIndex
+from inklink.domain.index import EntityMention, StoryIndex, StructuredFact
 from inklink.domain.models import (
     ChapterAnalysis,
     ChapterContract,
@@ -238,6 +238,17 @@ class InklinkPipeline:
             event_log = JsonlEventLog(run.log_dir / "events.jsonl")
             store = StateStore.open(run.log_dir / "state.sqlite")
             try:
+                if options.runtime_id is not None:
+                    completed_summary = _resume_completed_summary(store)
+                    if completed_summary is not None:
+                        event_log.write(
+                            "run_completed_reused",
+                            {
+                                "runtime_id": run.runtime_id,
+                                "generated_chapters": completed_summary.generated_chapters,
+                            },
+                        )
+                        return completed_summary
                 chapters = load_chapters(run.input_dir)
                 artifacts_dir = run.log_dir / "artifacts"
                 artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -256,6 +267,7 @@ class InklinkPipeline:
                 )
                 index = _index_from_analyses(analyses)
                 store.upsert_entity_mentions(index.mentions, source="chapter_analysis")
+                store.upsert_structured_facts(index.facts, source="chapter_analysis")
                 _write_json(artifacts_dir / "story_index.json", index.model_dump(mode="json"))
                 store.upsert_artifact(
                     artifact_id="story_index",
@@ -306,6 +318,7 @@ class InklinkPipeline:
                 retrieval_context = _retrieval_context(
                     analyses=analyses,
                     story_state=story_state,
+                    story_index=store.load_story_index(),
                     budget=config.writing.retrieval_token_budget,
                 )
 
@@ -492,6 +505,10 @@ class InklinkPipeline:
                         _mentions_from_analysis(generated_analysis, generation=generation),
                         source="generated_chapter",
                     )
+                    store.upsert_structured_facts(
+                        _facts_from_analysis(generated_analysis, generation=generation),
+                        source="generated_chapter",
+                    )
                     store.upsert_artifact(
                         artifact_id=f"chapter_analysis:{draft.chapter_number}",
                         artifact_type="chapter_analysis",
@@ -619,6 +636,7 @@ class InklinkPipeline:
                     "retrieval_context": _retrieval_context(
                         analyses=[],
                         story_state=story_state,
+                        story_index=store.load_story_index(),
                         budget=config.writing.retrieval_token_budget,
                     ),
                     "previous_generated_body": previous_generated_body,
@@ -955,6 +973,7 @@ def _retrieval_context(
     *,
     analyses: list[ChapterAnalysis],
     story_state: StoryState,
+    story_index: StoryIndex | None = None,
     budget: int | None,
 ) -> list[dict[str, object]]:
     items: list[dict[str, object]] = [
@@ -974,6 +993,8 @@ def _retrieval_context(
                 "text": f"{analysis.chapter_number}: {analysis.summary}",
             }
         )
+    if story_index is not None:
+        items.extend(story_index.retrieval_items(max_items=20))
     return trim_retrieval_items(items, budget)
 
 
@@ -1165,6 +1186,9 @@ def _index_from_analyses(analyses: list[ChapterAnalysis]) -> StoryIndex:
             for mention in _mentions_from_analysis(analysis, generation=1)
         ]
     )
+    index.upsert_facts(
+        [fact for analysis in analyses for fact in _facts_from_analysis(analysis, generation=1)]
+    )
     return index
 
 
@@ -1184,6 +1208,48 @@ def _mentions_from_analysis(
             )
         )
     return mentions
+
+
+def _facts_from_analysis(
+    analysis: ChapterAnalysis,
+    *,
+    generation: int,
+) -> list[StructuredFact]:
+    facts: list[StructuredFact] = []
+    for offset, fact in enumerate(analysis.worldbuilding):
+        facts.append(
+            StructuredFact(
+                fact_id=f"worldbuilding:{analysis.chapter_number}:{offset}",
+                kind="worldbuilding",
+                text=fact,
+                chapter_number=analysis.chapter_number,
+                generation=generation,
+                priority=4,
+            )
+        )
+    for offset, thread in enumerate(analysis.plot_threads):
+        facts.append(
+            StructuredFact(
+                fact_id=f"plot_thread:{analysis.chapter_number}:{offset}",
+                kind="plot_thread",
+                text=thread,
+                chapter_number=analysis.chapter_number,
+                generation=generation,
+                priority=2,
+            )
+        )
+    for offset, suspense in enumerate(analysis.suspense):
+        facts.append(
+            StructuredFact(
+                fact_id=f"event:{analysis.chapter_number}:{offset}",
+                kind="event",
+                text=suspense,
+                chapter_number=analysis.chapter_number,
+                generation=generation,
+                priority=3,
+            )
+        )
+    return facts
 
 
 def _call_idempotency_key(
@@ -1240,6 +1306,13 @@ def _write_chapter_output(
         os.replace(tmp_target, target)
         return target
     raise ValueError(f"unknown output_mode: {output_mode}")
+
+
+def _resume_completed_summary(store: StateStore) -> PipelineSummary | None:
+    artifact = store.get_latest_artifact("run_summary", approved_only=True)
+    if artifact is None:
+        return None
+    return PipelineSummary.model_validate(artifact["payload"])
 
 
 def _completed_chapter_output(

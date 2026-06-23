@@ -9,7 +9,7 @@ from typing import cast
 
 from pydantic import TypeAdapter
 
-from inklink.domain.index import EntityMention, StoryIndex
+from inklink.domain.index import EntityMention, StoryIndex, StructuredFact
 from inklink.llm.types import NormalizedUsage
 from inklink.storage.schema import SCHEMA_SQL, SCHEMA_VERSION
 
@@ -572,6 +572,42 @@ class StateStore:
             )
         self._connection.commit()
 
+    def upsert_structured_facts(
+        self,
+        facts: list[StructuredFact],
+        *,
+        source: str,
+    ) -> None:
+        for fact in facts:
+            self._connection.execute(
+                """
+                INSERT INTO structured_facts(
+                  fact_id,
+                  kind,
+                  chapter_number,
+                  generation,
+                  priority,
+                  payload_json,
+                  source
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fact_id, chapter_number, generation, source) DO UPDATE SET
+                  kind = excluded.kind,
+                  priority = excluded.priority,
+                  payload_json = excluded.payload_json
+                """,
+                (
+                    fact.fact_id,
+                    fact.kind,
+                    fact.chapter_number,
+                    fact.generation,
+                    fact.priority,
+                    fact.model_dump_json(),
+                    source,
+                ),
+            )
+        self._connection.commit()
+
     def abandon_generation(self, *, chapter_number: int, generation: int) -> None:
         if chapter_number <= 0:
             raise ValueError("chapter_number must be positive")
@@ -605,9 +641,20 @@ class StateStore:
             EntityMention.model_validate_json(cast(str, row["payload_json"]))
             for row in mention_rows
         ]
+        fact_rows = self._connection.execute(
+            """
+            SELECT payload_json
+            FROM structured_facts
+            ORDER BY fact_id, chapter_number, generation, source
+            """
+        ).fetchall()
+        facts = [
+            StructuredFact.model_validate_json(cast(str, row["payload_json"])) for row in fact_rows
+        ]
         return StoryIndex.model_validate(
             {
                 "mentions": [mention.model_dump(mode="json") for mention in mentions],
+                "facts": [fact.model_dump(mode="json") for fact in facts],
                 "abandoned_generations": [
                     [row["chapter_number"], row["generation"]] for row in abandoned_rows
                 ],

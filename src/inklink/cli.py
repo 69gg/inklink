@@ -14,8 +14,11 @@ from inklink.workflow.pipeline import (
     OpenAIToolLLM,
     PipelineSummary,
 )
+from inklink.workflow.service import WorkflowService
 
 app = typer.Typer(help="墨连 Inklink: AI-driven Chinese novel continuation TUI.")
+workflow_app = typer.Typer(help="Operate an existing Inklink workflow runtime.")
+app.add_typer(workflow_app, name="workflow")
 
 
 @app.command()
@@ -134,3 +137,112 @@ def _print_usage_summary(summary: PipelineSummary) -> None:
                 f"{task}: calls={bucket.calls} input={bucket.input_tokens} "
                 f"output={bucket.output_tokens} total={bucket.total_tokens}"
             )
+
+
+@workflow_app.command("info")
+def workflow_info(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Resume a runtime long enough to show basic state."""
+    with WorkflowService(log_root=log_root) as service:
+        run_state = service.resume_run(runtime_id)
+        typer.echo(f"runtime_id: {run_state.runtime_id}")
+        typer.echo(f"input_dir: {run_state.input_dir}")
+        typer.echo(f"log_dir: {run_state.log_dir}")
+        typer.echo(f"chapter_count: {run_state.chapter_count}")
+
+
+@workflow_app.command("stats")
+def workflow_stats(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Show persisted usage stats for an existing runtime."""
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(runtime_id)
+        rows = service.usage_stats()
+        if not rows:
+            typer.echo("no usage rows")
+            return
+        for row in rows:
+            typer.echo(
+                f"{row.profile}/{row.model}/{row.task_type}: calls={row.calls} "
+                f"input={row.input_tokens} output={row.output_tokens} total={row.total_tokens}"
+            )
+
+
+@workflow_app.command("message")
+def workflow_message(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    approval_id: Annotated[str, typer.Argument(help="Approval ID, for example outline.")],
+    content: Annotated[str, typer.Argument(help="Message content.")],
+    role: Annotated[str, typer.Option(help="Message role.")] = "user",
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Record an approval chat message."""
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(runtime_id)
+        result = service.record_approval_message(
+            approval_id=approval_id,
+            role=role,
+            content=content,
+        )
+        typer.echo(result.message)
+
+
+@workflow_app.command("approve")
+def workflow_approve(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    approval_id: Annotated[str, typer.Argument(help="Approval ID.")],
+    artifact_id: Annotated[str, typer.Argument(help="Artifact ID.")],
+    artifact_version: Annotated[int, typer.Argument(help="Artifact version.")],
+    approval_type: Annotated[str | None, typer.Option(help="Approval type.")] = None,
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Approve an artifact version."""
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(runtime_id)
+        result = service.approve_artifact(
+            approval_id=approval_id,
+            approval_type=approval_type or approval_id,
+            artifact_id=artifact_id,
+            artifact_version=artifact_version,
+        )
+        typer.echo(result.message)
+
+
+@workflow_app.command("retry")
+def workflow_retry(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    node_id: Annotated[str, typer.Argument(help="Workflow node ID.")],
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Record a manual retry request for a node."""
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(runtime_id)
+        typer.echo(service.retry_node(node_id).message)
+
+
+@workflow_app.command("abandon")
+def workflow_abandon(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    chapter_number: Annotated[int, typer.Argument(help="Chapter number.")],
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Abandon a chapter generation and increment its generation."""
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(runtime_id)
+        typer.echo(service.abandon_chapter(chapter_number).message)
+
+
+@workflow_app.command("rewrite")
+def workflow_rewrite(
+    runtime_id: Annotated[str, typer.Argument(help="Runtime ID under log root.")],
+    chapter_number: Annotated[int, typer.Argument(help="Chapter number.")],
+    log_root: Annotated[Path, typer.Option(help="Runtime log root.")] = Path("logs"),
+) -> None:
+    """Request creative rewrite for a chapter and increment its generation."""
+    with WorkflowService(log_root=log_root) as service:
+        service.resume_run(runtime_id)
+        typer.echo(service.rewrite_chapter(chapter_number).message)

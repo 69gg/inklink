@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 from inklink.cli import app
 from inklink.tui.app import InklinkApp
 from inklink.workflow.pipeline import GenerationOptions, PipelineSummary, RunStats
+from inklink.workflow.service import WorkflowService
 
 runner = CliRunner()
 
@@ -131,3 +132,74 @@ api_key_env = "MISSING_FAKE_KEY"
     assert options.runtime_id == "runtime"
     assert "usage_by_model" in result.output
     assert "fake-model" in result.output
+
+
+def test_cli_workflow_commands_operate_existing_runtime(tmp_path: Path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+    service = WorkflowService(log_root=log_root)
+    run = service.start_run(novel)
+    version = service.update_artifact(
+        artifact_id="outline",
+        artifact_type="outline",
+        payload={"outline": "初稿"},
+        approval_id="outline",
+    )
+    service.close()
+
+    info = runner.invoke(app, ["workflow", "info", run.runtime_id, "--log-root", str(log_root)])
+    message = runner.invoke(
+        app,
+        [
+            "workflow",
+            "message",
+            run.runtime_id,
+            "outline",
+            "请强化冲突",
+            "--log-root",
+            str(log_root),
+        ],
+    )
+    approve = runner.invoke(
+        app,
+        [
+            "workflow",
+            "approve",
+            run.runtime_id,
+            "outline",
+            "outline",
+            str(version),
+            "--log-root",
+            str(log_root),
+        ],
+    )
+    retry = runner.invoke(
+        app,
+        ["workflow", "retry", run.runtime_id, "draft-1", "--log-root", str(log_root)],
+    )
+    abandon = runner.invoke(
+        app,
+        ["workflow", "abandon", run.runtime_id, "1", "--log-root", str(log_root)],
+    )
+    rewrite = runner.invoke(
+        app,
+        ["workflow", "rewrite", run.runtime_id, "1", "--log-root", str(log_root)],
+    )
+    stats = runner.invoke(app, ["workflow", "stats", run.runtime_id, "--log-root", str(log_root)])
+
+    assert info.exit_code == 0
+    assert str(novel.resolve()) in info.output
+    assert message.exit_code == 0
+    assert "recorded approval message" in message.output
+    assert approve.exit_code == 0
+    assert "approved outline@1" in approve.output
+    assert retry.exit_code == 0
+    assert "accepted retry_node" in retry.output
+    assert abandon.exit_code == 0
+    assert "generation=2" in abandon.output
+    assert rewrite.exit_code == 0
+    assert "generation=3" in rewrite.output
+    assert stats.exit_code == 0
+    assert "no usage rows" in stats.output

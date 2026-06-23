@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS entity_mentions (
   PRIMARY KEY(entity_id, chapter_number, generation, source)
 );
 
+CREATE TABLE IF NOT EXISTS structured_facts (
+  fact_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  chapter_number INTEGER NOT NULL,
+  generation INTEGER NOT NULL,
+  priority INTEGER NOT NULL,
+  payload_json TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(fact_id, chapter_number, generation, source)
+);
+
 CREATE TABLE IF NOT EXISTS abandoned_generations (
   chapter_number INTEGER NOT NULL,
   generation INTEGER NOT NULL,

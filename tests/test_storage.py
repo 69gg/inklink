@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from inklink.domain.index import EntityMention
+from inklink.domain.index import EntityMention, StructuredFact
 from inklink.llm.types import NormalizedUsage
 from inklink.storage.events import JsonlEventLog
 from inklink.storage.schema import SCHEMA_VERSION
@@ -261,6 +261,29 @@ def test_state_store_generation_abandon_rebuilds_story_index(tmp_path: Path) -> 
 
         assert next_generation == 2
         assert index.characters["林青"].active_score == 1
+
+
+def test_state_store_persists_structured_facts_in_story_index(tmp_path: Path) -> None:
+    with StateStore.open(tmp_path / "state.sqlite") as store:
+        store.upsert_structured_facts(
+            [
+                StructuredFact(
+                    fact_id="thread-1",
+                    kind="plot_thread",
+                    text="旧钥匙尚未解释",
+                    chapter_number=3,
+                    generation=1,
+                    priority=2,
+                    keywords=["旧钥匙"],
+                )
+            ],
+            source="test",
+        )
+
+        index = store.load_story_index()
+
+        assert [fact.text for fact in index.active_facts()] == ["旧钥匙尚未解释"]
+        assert index.retrieval_items(keywords=["旧钥匙"])[0]["text"] == "旧钥匙尚未解释"
 
 
 def test_state_store_close_releases_connection(tmp_path: Path) -> None:

@@ -29,6 +29,15 @@ uv run inklink run ./novel --config config.toml --execute \
   --resume-runtime-id <runtime_id>
 ```
 
+操作已有 runtime：
+
+```bash
+uv run inklink workflow info <runtime_id>
+uv run inklink workflow stats <runtime_id>
+uv run inklink workflow message <runtime_id> outline "请强化冲突"
+uv run inklink workflow approve <runtime_id> outline outline 1
+```
+
 ## 验证命令
 
 提交前运行完整验证：

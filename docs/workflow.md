@@ -98,11 +98,15 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 - `resume_run()` 会重新打开 `logs/<runtime_id>/state.sqlite`，获取项目锁，并记录 `run_resumed`。
 - `abandon_chapter()` 会递增 generation、登记废弃 generation，并记录 `chapter_abandon_requested` 事件。
 - `rewrite_chapter()` 会递增 generation、登记废弃 generation，并记录 `chapter_rewrite_requested` 事件。
+- `record_approval_message()` 会写入审批聊天消息并更新消息 hash。
+- `approve_artifact()` 会批准指定 artifact 版本。
+- `usage_stats()` 会从持久化 LLM 调用记录聚合 profile/model/task 用量。
 - `WorkflowExecutor` 能按依赖运行节点、拒绝重复节点和循环依赖，并在 runner 失败时标记 failed。
 - `InklinkPipeline` 会执行当前端到端生成流：`chapter_extraction`、`range_summary`、`story_merge`、`outline_planning`、`chapter_planning`、`scene_planning`、`drafting`、`review`、`revision`、生成章节集成分析和输出写入。
 - 同章内场景按顺序生成，后续场景 prompt 包含前序场景正文。
 - 确定性检查覆盖章节字数、场景字数、场景总目标区间、必须人物/关键词和重复回收伏笔。
 - `output` 模式写入 `logs/<runtime_id>/outputs/chapters/<N>.txt`；`writeback` 模式拒绝覆盖已存在目标文件。
 - `--resume-runtime-id` 会恢复同一 runtime，复用已成功 LLM tool result，并跳过已完成且输出文件仍存在的章节。
+- `inklink workflow ...` 子命令可对已有 runtime 执行 info、stats、message、approve、retry、abandon 和 rewrite。
 
 仍未完整接通的部分包括：多轮审批聊天、artifact diff、可视化节点树、完整结构化检索查询、artifact/downstream 自动失效和 shallow 分析自动升级。

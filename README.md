@@ -67,6 +67,18 @@ uv run inklink run ./novel --config config.toml --execute \
 
 恢复时会复用 SQLite 中已成功的 LLM tool result，并跳过已完成且输出文件仍存在的章节。
 
+查看或操作已有运行：
+
+```bash
+uv run inklink workflow info <runtime_id>
+uv run inklink workflow stats <runtime_id>
+uv run inklink workflow message <runtime_id> outline "请强化冲突"
+uv run inklink workflow approve <runtime_id> outline outline 1
+uv run inklink workflow retry <runtime_id> draft-1
+uv run inklink workflow abandon <runtime_id> 1
+uv run inklink workflow rewrite <runtime_id> 1
+```
+
 ## 输入格式
 
 输入目录中的章节文件必须使用连续 ASCII 正整数命名：
