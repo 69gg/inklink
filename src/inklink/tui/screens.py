@@ -345,6 +345,10 @@ class SetupWorkspace(VerticalScroll):
     def set_run_summary(self, summary: str) -> None:
         self.query_one("#setup-run-summary", Static).update(summary)
 
+    def set_run_buttons_enabled(self, enabled: bool) -> None:
+        self.query_one("#run-pipeline", Button).disabled = not enabled
+        self.query_one("#resume-pipeline", Button).disabled = not enabled
+
     def _input_value(self, selector: str) -> str:
         return self.query_one(selector, Input).value.strip()
 

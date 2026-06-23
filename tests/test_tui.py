@@ -1,3 +1,5 @@
+import asyncio
+
 from textual.widgets import Button, Input, Static, TextArea
 
 from inklink.tui.app import InklinkApp
@@ -10,7 +12,7 @@ from inklink.tui.screens import (
     StatsScreen,
     _format_node_tree,
 )
-from inklink.workflow.pipeline import PipelineSummary, RunStats
+from inklink.workflow.pipeline import PipelineProgress, PipelineSummary, RunStats
 from inklink.workflow.service import WorkflowService
 
 
@@ -92,6 +94,22 @@ async def test_tui_f1_does_not_push_duplicate_dashboard_screen() -> None:
 
         assert pilot.app.screen is dashboard_screen
         assert len(pilot.app.screen_stack) == dashboard_stack_size
+
+
+async def test_tui_runtime_navigation_reuses_existing_screen_ids() -> None:
+    app = InklinkApp()
+
+    async with app.run_test() as pilot:
+        await pilot.press("f5")
+        await pilot.press("f1")
+        await pilot.press("f2")
+        await pilot.press("f1")
+
+        screen_ids = [screen.id for screen in pilot.app.screen_stack if screen.id is not None]
+
+        assert isinstance(pilot.app.screen, DashboardScreen)
+        assert screen_ids.count("dashboard") == 1
+        assert len(screen_ids) == len(set(screen_ids))
 
 
 async def test_tui_f2_shows_stats_screen() -> None:
@@ -203,8 +221,9 @@ async def test_tui_ctrl_r_starts_pipeline_when_input_dir_is_set(monkeypatch, tmp
     captured: dict[str, object] = {}
 
     class FakePipeline:
-        def __init__(self, llm: object) -> None:
+        def __init__(self, llm: object, progress_callback: object = None) -> None:
             captured["llm"] = llm
+            captured["progress_callback"] = progress_callback
 
         async def run(self, options: object) -> object:
             captured["options"] = options
@@ -251,12 +270,94 @@ api_key_env = "MISSING_FAKE_KEY"
     assert latest_runtime_id == "runtime"
 
 
+async def test_tui_start_run_shows_immediate_and_live_progress(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class FakePipeline:
+        def __init__(self, llm: object, progress_callback: object = None) -> None:
+            captured["llm"] = llm
+            captured["progress_callback"] = progress_callback
+
+        async def run(self, options: object) -> object:
+            captured["options"] = options
+            progress_callback = captured["progress_callback"]
+            if callable(progress_callback):
+                progress_callback(
+                    PipelineProgress(
+                        message="测试阶段",
+                        runtime_id="runtime-running",
+                        node_id="test-node",
+                    )
+                )
+            started.set()
+            await release.wait()
+            return PipelineSummary(
+                runtime_id="runtime-running",
+                log_dir=tmp_path / "logs" / "runtime-running",
+                generated_chapters=[],
+                output_files=[],
+                stats=RunStats(total_calls=0),
+            )
+
+    class FakeLLM:
+        def __init__(self, config: object, api_keys: object) -> None:
+            captured["config"] = config
+            captured["api_keys"] = api_keys
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[models.default]
+api = "responses"
+model = "fake-model"
+api_key_env = "MISSING_FAKE_KEY"
+""",
+        encoding="utf-8",
+    )
+    novel = tmp_path / "novel"
+    novel.mkdir()
+
+    monkeypatch.setattr("inklink.tui.app.InklinkPipeline", FakePipeline)
+    monkeypatch.setattr("inklink.tui.app.OpenAIToolLLM", FakeLLM)
+
+    app = InklinkApp(input_dir=novel, config=config, log_root=tmp_path / "logs")
+
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+r")
+
+        immediate_summary = pilot.app.screen.query_one("#setup-run-summary", Static).render()
+        run_button = pilot.app.screen.query_one("#run-pipeline", Button)
+
+        assert "未开始" not in str(immediate_summary)
+        assert "运行中" in str(immediate_summary) or "后台任务已提交" in str(immediate_summary)
+        assert run_button.disabled is True
+
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await pilot.pause()
+
+        live_status = pilot.app.screen.query_one("#setup-workspace", Static).render()
+        live_summary = pilot.app.screen.query_one("#setup-run-summary", Static).render()
+
+        assert "测试阶段" in str(live_status)
+        assert "test-node" in str(live_summary)
+
+        release.set()
+        await pilot.pause()
+
+        final_status = pilot.app.screen.query_one("#setup-workspace", Static).render()
+
+    assert "运行完成" in str(final_status)
+
+
 async def test_tui_ctrl_r_uses_generation_controls(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
     class FakePipeline:
-        def __init__(self, llm: object) -> None:
+        def __init__(self, llm: object, progress_callback: object = None) -> None:
             captured["llm"] = llm
+            captured["progress_callback"] = progress_callback
 
         async def run(self, options: object) -> object:
             captured["options"] = options

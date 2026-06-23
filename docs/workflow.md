@@ -40,7 +40,7 @@ load_project
 
 审批聊天每轮消息都会入库、参与幂等键，并在 `chat-update` 时作为完整会话历史交给对应 `update_*` 工具。AI 更新产物后会把 change summary 写回审批消息，避免后续轮次只看到最后一句用户意见。
 
-当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 首页可填写运行参数并启动或恢复 runtime；F1 展示文本 DAG 树和 runtime 状态；F4 屏幕可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节；F3 屏幕可输入 artifact ID 与两个版本号查看 JSON/unified diff。
+当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 首页可填写运行参数并启动或恢复 runtime；启动后会先显示后台运行提示，并持续刷新当前阶段、节点、章节和最近事件；F1 展示文本 DAG 树和 runtime 状态；F4 屏幕可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节；F3 屏幕可输入 artifact ID 与两个版本号查看 JSON/unified diff。
 
 启动任务时的输入目录、配置文件、输出模式、章节数、起始章节、字数区间、修订轮数、自动批准默认值和 notes 会保存为 `run_settings` artifact，并同步到 SQLite `runs.settings_json`。notes 是额外约束，会进入故事合并、大纲、章节计划、场景计划、正文、review 和 revision 的模型输入；但正文中已有章节仍是世界观和设定推断的主要来源。恢复同一 runtime 时默认复用保存的创作参数，避免用户重启 TUI 后丢失 notes 或误改字数范围；本次 resume 的 `--auto-approve` 可临时放行后续审批点。
 
@@ -116,6 +116,6 @@ SQLite 是恢复依据，JSONL 是审计日志。设计恢复粒度包括：
 - `--resume-runtime-id` 会恢复同一 runtime，复用已成功 LLM tool result，并跳过已完成且输出文件仍存在的章节。
 - `run_settings` 会在恢复时优先作为参数来源；CLI/TUI 不需要重新填写 notes、字数范围或输出模式。
 - `inklink workflow ...` 子命令可对已有 runtime 执行 info、stats、nodes、artifacts、artifact、approvals、messages、events、message、chat-update、approve、retry、abandon 和 rewrite。查询类命令使用只读 inspect，不会把已完成 run 改回 running。
-- TUI 已提供参数化启动/恢复入口、runtime 状态汇总、文本 DAG 树、审批消息、AI 产物修改、artifact diff、批准、retry、abandon 和 rewrite 控件。
+- TUI 已提供参数化启动/恢复入口、后台运行状态提示、runtime 状态汇总、文本 DAG 树、审批消息、AI 产物修改、artifact diff、批准、retry、abandon 和 rewrite 控件。
 
 首版保持同进程 TUI/workflow service 边界，不提供后台 daemon。若某章节 generation 已被吸收到区间摘要后才被放弃，结构化索引事实会撤回，但对应区间摘要需要重新生成后才能彻底移除该 generation 的自然语言痕迹。
