@@ -8,12 +8,13 @@ from typing import NoReturn, cast
 import pytest
 from pydantic import ValidationError
 
+from inklink.llm.types import NormalizedUsage
 from inklink.locks import ProjectLock
 from inklink.storage.events import JsonlEventLog
 from inklink.storage.sqlite import StateStore
 from inklink.workflow.executor import WorkflowExecutor
 from inklink.workflow.models import IdempotencyInputs, NodeState, WorkflowNode, idempotency_key
-from inklink.workflow.service import WorkflowService, WorkflowServiceError
+from inklink.workflow.service import UsageStatRow, WorkflowService, WorkflowServiceError
 
 
 def make_idempotency_inputs(
@@ -519,6 +520,69 @@ def test_service_command_methods_validate_inputs_and_write_events(tmp_path: Path
         "next_generation": 3,
     }
     assert events[3]["payload"] == {"runtime_id": run.runtime_id, "node_id": "draft-1"}
+
+
+def test_service_records_approval_messages_artifacts_and_stats(tmp_path: Path) -> None:
+    project = tmp_path / "novel"
+    project.mkdir()
+    write_workflow_chapter(project / "1.txt")
+
+    with WorkflowService(log_root=tmp_path / "logs") as service:
+        run = service.start_run(project)
+        version = service.update_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"outline": "初稿"},
+            approval_id="outline",
+        )
+        message = service.record_approval_message(
+            approval_id="outline",
+            role="user",
+            content="请强化冲突",
+        )
+        approved = service.approve_artifact(
+            approval_id="outline",
+            approval_type="outline",
+            artifact_id="outline",
+            artifact_version=version,
+        )
+        call_id = service._current_run().store.create_llm_call(
+            runtime_id=run.runtime_id,
+            idempotency_key="key",
+            task_type="review",
+            profile="default",
+            api_type="responses",
+            model="fake",
+            attempt=1,
+            request={},
+        )
+        service._current_run().store.complete_llm_call(
+            call_id=call_id,
+            request_id="req",
+            response={},
+            usage=NormalizedUsage(input_tokens=2, output_tokens=3, total_tokens=5),
+        )
+        stats = service.usage_stats()
+
+        assert version == 1
+        assert message.accepted is True
+        assert approved.message == "approved outline@1"
+        assert stats == [
+            UsageStatRow(
+                profile="default",
+                model="fake",
+                task_type="review",
+                calls=1,
+                input_tokens=2,
+                output_tokens=3,
+                total_tokens=5,
+            )
+        ]
+
+    events = read_workflow_events(run.log_dir / "events.jsonl")
+    assert "artifact_updated" in [event["event_type"] for event in events]
+    assert "approval_message_recorded" in [event["event_type"] for event in events]
+    assert "approval_accepted" in [event["event_type"] for event in events]
 
 
 def test_service_chapter_commands_reject_out_of_range_without_events(tmp_path: Path) -> None:

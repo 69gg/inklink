@@ -1,7 +1,7 @@
 from textual.widgets import Static
 
 from inklink.tui.app import InklinkApp
-from inklink.tui.screens import DashboardScreen
+from inklink.tui.screens import DashboardScreen, StatsScreen
 from inklink.workflow.pipeline import PipelineSummary, RunStats
 
 
@@ -44,6 +44,17 @@ async def test_tui_f1_does_not_push_duplicate_dashboard_screen() -> None:
 
         assert pilot.app.screen is dashboard_screen
         assert len(pilot.app.screen_stack) == dashboard_stack_size
+
+
+async def test_tui_f2_shows_stats_screen() -> None:
+    app = InklinkApp()
+
+    async with app.run_test() as pilot:
+        await pilot.press("f2")
+
+        assert isinstance(pilot.app.screen, StatsScreen)
+        assert pilot.app.screen.id == "stats"
+        assert pilot.app.screen.title == "统计"
 
 
 async def test_tui_ctrl_r_starts_pipeline_when_input_dir_is_set(monkeypatch, tmp_path) -> None:
@@ -91,6 +102,8 @@ api_key_env = "MISSING_FAKE_KEY"
         await pilot.pause()
 
         status = pilot.app.screen.query_one("#setup-workspace", Static).render()
+        latest_runtime_id = pilot.app.latest_runtime_id
 
     assert "运行完成" in str(status)
     assert captured["options"].input_dir == novel
+    assert latest_runtime_id == "runtime"

@@ -147,3 +147,35 @@ class DashboardScreen(Screen[None]):
                 yield Static("审批区", classes="dashboard-title")
                 yield Static("当前版本记录审批事件；完整 artifact diff 和聊天面板后续接入。")
         yield Footer()
+
+
+class StatsScreen(Screen[None]):
+    """Usage statistics placeholder backed by runtime summaries."""
+
+    DEFAULT_CSS = """
+    StatsScreen {
+        padding: 1 2;
+    }
+
+    #stats-workspace {
+        height: auto;
+        margin-bottom: 1;
+    }
+    """
+
+    def __init__(self, runtime_id: str | None = None) -> None:
+        super().__init__(id="stats", name="stats")
+        self._runtime_id = runtime_id
+        self.title = "统计"
+
+    def compose(self) -> ComposeResult:
+        runtime_text = self._runtime_id or "暂无运行"
+        yield Header()
+        yield Static(
+            "统计\n"
+            f"runtime_id: {runtime_text}\n"
+            "CLI 执行会输出 usage_by_model 与 usage_by_task；"
+            "详细 JSON 保存在 logs/<runtime_id>/artifacts/run_summary.json。",
+            id="stats-workspace",
+        )
+        yield Footer()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -33,6 +34,17 @@ class StartRunCheck:
 class CommandResult:
     accepted: bool
     message: str
+
+
+@dataclass(frozen=True)
+class UsageStatRow:
+    profile: str
+    model: str
+    task_type: str
+    calls: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
 
 
 @dataclass
@@ -228,6 +240,149 @@ class WorkflowService:
             message=f"accepted retry_node for node {node_id}",
         )
 
+    def record_approval_message(
+        self,
+        *,
+        approval_id: str,
+        role: str,
+        content: str,
+    ) -> CommandResult:
+        _validate_non_blank_identifier("approval_id", approval_id)
+        _validate_non_blank_identifier("role", role)
+        if not content.strip():
+            raise ValueError("content must not be empty")
+        active_run = self._current_run()
+        message_id = uuid4().hex
+        active_run.store.create_or_update_approval(
+            approval_id=approval_id,
+            approval_type=approval_id,
+            status="waiting",
+            auto_approve=False,
+        )
+        active_run.store.add_message(
+            message_id=message_id,
+            approval_id=approval_id,
+            role=role,
+            content=content,
+        )
+        messages_hash = active_run.store.approval_messages_hash(approval_id)
+        active_run.event_log.write(
+            "approval_message_recorded",
+            {
+                "runtime_id": active_run.run.runtime_id,
+                "approval_id": approval_id,
+                "message_id": message_id,
+                "role": role,
+                "messages_hash": messages_hash,
+            },
+        )
+        return CommandResult(
+            accepted=True,
+            message=f"recorded approval message {message_id}",
+        )
+
+    def approve_artifact(
+        self,
+        *,
+        approval_id: str,
+        approval_type: str,
+        artifact_id: str,
+        artifact_version: int,
+    ) -> CommandResult:
+        _validate_non_blank_identifier("approval_id", approval_id)
+        _validate_non_blank_identifier("approval_type", approval_type)
+        _validate_non_blank_identifier("artifact_id", artifact_id)
+        if artifact_version <= 0:
+            raise ValueError("artifact_version must be positive")
+        active_run = self._current_run()
+        active_run.store.create_or_update_approval(
+            approval_id=approval_id,
+            approval_type=approval_type,
+            status="accepted",
+            auto_approve=False,
+            artifact_id=artifact_id,
+            artifact_version=artifact_version,
+        )
+        active_run.event_log.write(
+            "approval_accepted",
+            {
+                "runtime_id": active_run.run.runtime_id,
+                "approval_id": approval_id,
+                "approval_type": approval_type,
+                "artifact_id": artifact_id,
+                "artifact_version": artifact_version,
+                "auto_approve": False,
+            },
+        )
+        return CommandResult(
+            accepted=True,
+            message=f"approved {artifact_id}@{artifact_version}",
+        )
+
+    def update_artifact(
+        self,
+        *,
+        artifact_id: str,
+        artifact_type: str,
+        payload: object,
+        approval_id: str | None = None,
+        is_draft: bool = True,
+    ) -> int:
+        _validate_non_blank_identifier("artifact_id", artifact_id)
+        _validate_non_blank_identifier("artifact_type", artifact_type)
+        if approval_id is not None:
+            _validate_non_blank_identifier("approval_id", approval_id)
+        active_run = self._current_run()
+        version = active_run.store.upsert_artifact(
+            artifact_id=artifact_id,
+            artifact_type=artifact_type,
+            payload=payload,
+            is_draft=is_draft,
+            is_approved=not is_draft,
+            approval_id=approval_id,
+        )
+        active_run.event_log.write(
+            "artifact_updated",
+            {
+                "runtime_id": active_run.run.runtime_id,
+                "artifact_id": artifact_id,
+                "artifact_type": artifact_type,
+                "version": version,
+                "is_draft": is_draft,
+                "approval_id": approval_id,
+            },
+        )
+        return version
+
+    def usage_stats(self) -> list[UsageStatRow]:
+        active_run = self._current_run()
+        grouped: dict[tuple[str, str, str], UsageStatRow] = {}
+        for row in active_run.store.usage_summary():
+            usage = row.get("normalized_usage_json")
+            parsed = _parse_usage_json(usage)
+            key = (str(row["profile"]), str(row["model"]), str(row["task_type"]))
+            current = grouped.get(key)
+            if current is None:
+                current = UsageStatRow(
+                    profile=key[0],
+                    model=key[1],
+                    task_type=key[2],
+                    calls=0,
+                    input_tokens=0,
+                    output_tokens=0,
+                    total_tokens=0,
+                )
+            grouped[key] = UsageStatRow(
+                profile=current.profile,
+                model=current.model,
+                task_type=current.task_type,
+                calls=current.calls + 1,
+                input_tokens=current.input_tokens + parsed.get("input_tokens", 0),
+                output_tokens=current.output_tokens + parsed.get("output_tokens", 0),
+                total_tokens=current.total_tokens + parsed.get("total_tokens", 0),
+            )
+        return [grouped[key] for key in sorted(grouped)]
+
     def close(self) -> None:
         first_error: BaseException | None = None
         for runtime_id, active_run in list(self._active_runs.items()):
@@ -267,9 +422,37 @@ class WorkflowService:
             )
 
 
+def _validate_non_blank_identifier(field_name: str, value: str) -> None:
+    if not value.strip() or value != value.strip():
+        raise ValueError(f"{field_name} must not be empty or contain leading/trailing whitespace")
+
+
+def _parse_usage_json(value: object) -> dict[str, int]:
+    if not isinstance(value, str):
+        return {}
+    raw = json.loads(value)
+    if not isinstance(raw, dict):
+        return {}
+    parsed: dict[str, int] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "reasoning_tokens",
+        "cached_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    ):
+        item = raw.get(key)
+        if isinstance(item, int) and not isinstance(item, bool):
+            parsed[key] = item
+    return parsed
+
+
 __all__ = [
     "CommandResult",
     "StartRunCheck",
+    "UsageStatRow",
     "WorkflowRun",
     "WorkflowService",
     "WorkflowServiceError",

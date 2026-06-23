@@ -6,7 +6,7 @@ from textual.binding import Binding
 from textual.widgets import Footer, Header
 
 from inklink.config import load_config
-from inklink.tui.screens import DashboardScreen, SetupWorkspace
+from inklink.tui.screens import DashboardScreen, SetupWorkspace, StatsScreen
 from inklink.workflow.pipeline import GenerationOptions, InklinkPipeline, OpenAIToolLLM
 
 
@@ -16,6 +16,7 @@ class InklinkApp(App[None]):
     TITLE = "墨连 Inklink"
     BINDINGS = [
         Binding("f1", "show_dashboard", "工作台"),
+        Binding("f2", "show_stats", "统计"),
         Binding("ctrl+r", "run_pipeline", "开始续写"),
     ]
 
@@ -23,6 +24,7 @@ class InklinkApp(App[None]):
         super().__init__()
         self.input_dir = input_dir
         self.config = config
+        self.latest_runtime_id: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -32,6 +34,10 @@ class InklinkApp(App[None]):
     def action_show_dashboard(self) -> None:
         if not isinstance(self.screen, DashboardScreen):
             self.push_screen(DashboardScreen(input_dir=self.input_dir, config=self.config))
+
+    def action_show_stats(self) -> None:
+        if not isinstance(self.screen, StatsScreen):
+            self.push_screen(StatsScreen(runtime_id=self.latest_runtime_id))
 
     async def action_run_pipeline(self) -> None:
         setup = self.query_one(SetupWorkspace)
@@ -57,6 +63,7 @@ class InklinkApp(App[None]):
         except Exception as exc:
             setup.set_status(f"运行失败: {exc}")
             return
+        self.latest_runtime_id = summary.runtime_id
         setup.set_status(
             f"运行完成: {summary.runtime_id}，生成 {len(summary.generated_chapters)} 章，"
             f"调用 {summary.stats.total_calls} 次"
