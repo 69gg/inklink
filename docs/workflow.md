@@ -40,7 +40,7 @@ load_project
 
 审批聊天每轮消息都会入库、参与幂等键，并在 `chat-update` 时作为完整会话历史交给对应 `update_*` 工具。AI 更新产物后会把 change summary 写回审批消息，避免后续轮次只看到最后一句用户意见。
 
-当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 首页可填写运行参数并启动或恢复 runtime；启动后会自动进入工作台，持续刷新当前阶段、节点、章节、LLM 任务、最近事件和用量统计，并在长时间无新进度时提示可能正在等待模型、限流或 IO。进入审批点或 writeback 冲突时，TUI 会自动切到 F4 审批页并预填审批 ID、产物 ID、类型、版本和相关章节号；如果用户正在审批页输入消息，界面只刷新状态，不覆盖表单。F4 屏幕可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节；F3 屏幕可输入 artifact ID 与两个版本号查看 JSON/unified diff。
+当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。TUI 首页可填写运行参数并启动或恢复 runtime；启动后会自动进入工作台，持续刷新当前阶段、节点、章节、LLM 任务、最近事件和用量统计，并在长时间无新进度时提示可能正在等待模型、限流或 IO。进入审批点或 writeback 冲突时，TUI 会自动切到 F4 审批页并预填审批 ID、产物 ID、类型、版本和相关章节号；如果用户正在审批页输入消息，界面只刷新状态，不覆盖表单。F4 屏幕会直接预览当前等待审批的 artifact 内容，可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节；F3 屏幕可输入 artifact ID 查看内容，也可输入 artifact ID 与两个版本号查看 JSON/unified diff。
 
 若模型返回了不可解析的 tool 参数 JSON、未调用期望工具或返回不符合 schema 的结构，pipeline 会按对应 model profile 的 `max_retries` 自动重试。重试耗尽后会把当前 LLM call 和正在执行的节点标为 `failed`，写入 `run_failed` 事件，并把 `run_summary.json` 与 SQLite run 状态更新为 `failed`；TUI 重启后也会从持久化摘要中显示失败原因。
 

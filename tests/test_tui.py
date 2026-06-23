@@ -172,11 +172,94 @@ async def test_tui_artifacts_screen_contains_diff_controls() -> None:
         await pilot.press("f3")
 
         assert isinstance(pilot.app.screen, RuntimeArtifactsScreen)
+        assert pilot.app.screen.query_one("#view-artifact-id", Input)
+        assert pilot.app.screen.query_one("#view-artifact-version", Input)
+        assert pilot.app.screen.query_one("#show-artifact", Button)
+        assert pilot.app.screen.query_one("#artifact-view-output", Static)
         assert pilot.app.screen.query_one("#diff-artifact-id", Input)
         assert pilot.app.screen.query_one("#diff-left-version", Input)
         assert pilot.app.screen.query_one("#diff-right-version", Input)
         assert pilot.app.screen.query_one("#show-artifact-diff", Button)
         assert pilot.app.screen.query_one("#artifact-diff-output", Static)
+
+
+async def test_tui_artifacts_screen_shows_artifact_content(tmp_path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(novel)
+
+    with StateStore.open(run.log_dir / "state.sqlite") as store:
+        store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"outline": "下一章进入密室。", "notes": ["保留青灯悬念"]},
+            is_draft=True,
+            approval_id="outline",
+        )
+
+    app = InklinkApp(input_dir=novel, log_root=log_root)
+    app.latest_runtime_id = run.runtime_id
+
+    async with app.run_test() as pilot:
+        await pilot.press("f3")
+        screen = pilot.app.screen
+        assert isinstance(screen, RuntimeArtifactsScreen)
+        screen.query_one("#view-artifact-id", Input).value = "outline"
+
+        screen.show_artifact()
+        await pilot.pause()
+
+        output = screen.query_one("#artifact-view-output", Static).render()
+
+    assert "当前产物: outline@1" in str(output)
+    assert "下一章进入密室" in str(output)
+    assert "保留青灯悬念" in str(output)
+
+
+async def test_tui_artifacts_screen_prefills_waiting_artifact(tmp_path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(novel)
+
+    with StateStore.open(run.log_dir / "state.sqlite") as store:
+        version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"outline": "自动展示的大纲。"},
+            is_draft=True,
+            approval_id="outline",
+        )
+        store.create_or_update_approval(
+            approval_id="outline",
+            approval_type="outline",
+            status="waiting",
+            auto_approve=False,
+            artifact_id="outline",
+            artifact_version=version,
+        )
+        store.update_run_status(run.runtime_id, "waiting_approval")
+
+    app = InklinkApp(input_dir=novel, log_root=log_root)
+    app.latest_runtime_id = run.runtime_id
+
+    async with app.run_test() as pilot:
+        await pilot.press("f3")
+        screen = pilot.app.screen
+        assert isinstance(screen, RuntimeArtifactsScreen)
+
+        output = screen.query_one("#artifact-view-output", Static).render()
+
+        assert screen.query_one("#view-artifact-id", Input).value == "outline"
+        assert screen.query_one("#view-artifact-version", Input).value == str(version)
+        assert "自动展示的大纲" in str(output)
 
 
 def test_tui_formats_node_tree_from_dependencies() -> None:
@@ -279,6 +362,49 @@ async def test_tui_approvals_prefill_waiting_artifact(tmp_path) -> None:
         assert screen.query_one("#approval-artifact-id", Input).value == "outline"
         assert screen.query_one("#approval-artifact-type", Input).value == "outline"
         assert screen.query_one("#approval-artifact-version", Input).value == str(version)
+        preview = screen.query_one("#approval-artifact-preview", Static).render()
+        assert "当前产物: outline@1" in str(preview)
+
+
+async def test_tui_approvals_preview_waiting_outline_payload(tmp_path) -> None:
+    novel = tmp_path / "novel"
+    novel.mkdir()
+    (novel / "1.txt").write_text("title: 第一章\n---\n正文", encoding="utf-8")
+    log_root = tmp_path / "logs"
+
+    with WorkflowService(log_root=log_root) as service:
+        run = service.start_run(novel)
+
+    with StateStore.open(run.log_dir / "state.sqlite") as store:
+        version = store.upsert_artifact(
+            artifact_id="outline",
+            artifact_type="outline",
+            payload={"outline": "续写大纲：主角追查青灯。", "notes": ["加强冲突"]},
+            is_draft=True,
+            approval_id="outline",
+        )
+        store.create_or_update_approval(
+            approval_id="outline",
+            approval_type="outline",
+            status="waiting",
+            auto_approve=False,
+            artifact_id="outline",
+            artifact_version=version,
+        )
+        store.update_run_status(run.runtime_id, "waiting_approval")
+
+    app = InklinkApp(input_dir=novel, log_root=log_root)
+    app.latest_runtime_id = run.runtime_id
+
+    async with app.run_test() as pilot:
+        await pilot.press("f4")
+        await pilot.pause()
+
+        preview = pilot.app.screen.query_one("#approval-artifact-preview", Static).render()
+
+    assert "当前产物: outline@1" in str(preview)
+    assert "续写大纲：主角追查青灯" in str(preview)
+    assert "加强冲突" in str(preview)
 
 
 async def test_tui_waiting_approval_does_not_overwrite_user_input(tmp_path) -> None:

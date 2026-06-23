@@ -525,12 +525,30 @@ class RuntimeArtifactsScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         snapshot = load_run_snapshot(log_root=self._log_root, runtime_id=self._runtime_id)
+        view_artifact_id, view_artifact_version = _artifact_view_defaults(snapshot)
+        initial_view = (
+            _format_waiting_artifact_preview(snapshot, self._log_root) if view_artifact_id else ""
+        )
         yield Header()
         with ScreenBody():
             yield Static(
                 _format_artifacts_workspace(snapshot),
                 id="artifacts-workspace",
             )
+            with Vertical(id="artifact-view-controls"):
+                yield Static("查看产物内容")
+                yield Input(
+                    value=view_artifact_id,
+                    placeholder="产物 ID，例如 outline",
+                    id="view-artifact-id",
+                )
+                yield Input(
+                    value=view_artifact_version,
+                    placeholder="版本号，留空查看最新版本",
+                    id="view-artifact-version",
+                )
+                yield Button("查看产物", id="show-artifact")
+                yield Static(initial_view, id="artifact-view-output")
             with Vertical(id="artifact-diff-controls"):
                 yield Static("产物版本对比")
                 yield Input(placeholder="产物 ID", id="diff-artifact-id")
@@ -543,6 +561,29 @@ class RuntimeArtifactsScreen(Screen[None]):
     def refresh_from_snapshot(self, snapshot: RunSnapshot) -> None:
         self._runtime_id = snapshot.runtime_id or self._runtime_id
         _update_static(self, "#artifacts-workspace", _format_artifacts_workspace(snapshot))
+
+    @on(Button.Pressed, "#show-artifact")
+    def show_artifact(self) -> None:
+        output = self.query_one("#artifact-view-output", Static)
+        if self._runtime_id is None:
+            output.update("暂无运行。")
+            return
+        artifact_id = self.query_one("#view-artifact-id", Input).value.strip()
+        version_text = self.query_one("#view-artifact-version", Input).value.strip()
+        try:
+            if not artifact_id:
+                raise ValueError("产物 ID 不能为空")
+            version = (
+                None if not version_text else _parse_required_int("版本号", version_text, minimum=1)
+            )
+            from inklink.workflow.service import WorkflowService
+
+            with WorkflowService(log_root=self._log_root) as service:
+                service.inspect_run(self._runtime_id)
+                artifact = service.get_artifact(artifact_id, version)
+            output.update(_format_artifact_preview(artifact))
+        except Exception as exc:
+            output.update(f"查看产物失败: {exc}")
 
     @on(Button.Pressed, "#show-artifact-diff")
     def show_artifact_diff(self) -> None:
@@ -593,6 +634,10 @@ class RuntimeApprovalsScreen(Screen[None]):
                 _format_approval_workspace(snapshot),
                 id="approvals-workspace",
             )
+            yield Static(
+                _format_waiting_artifact_preview(snapshot, self._log_root),
+                id="approval-artifact-preview",
+            )
             with Vertical(id="approval-controls"):
                 yield Input(placeholder="审批 ID", id="approval-id")
                 yield Input(placeholder="审批消息", id="approval-message")
@@ -629,6 +674,11 @@ class RuntimeApprovalsScreen(Screen[None]):
     def refresh_from_snapshot(self, snapshot: RunSnapshot, *, prefill: bool = False) -> None:
         self._runtime_id = snapshot.runtime_id or self._runtime_id
         _update_static(self, "#approvals-workspace", _format_approval_workspace(snapshot))
+        _update_static(
+            self,
+            "#approval-artifact-preview",
+            _format_waiting_artifact_preview(snapshot, self._log_root),
+        )
         if prefill:
             self.prefill_from_snapshot(snapshot)
 
@@ -757,11 +807,7 @@ class RuntimeApprovalsScreen(Screen[None]):
             self._fill_input("#approval-artifact-version", str(version))
             self.query_one("#approval-message", Input).value = ""
             status.update(f"AI 修改产物: updated {artifact_id}@{version}")
-            self.query_one("#approvals-workspace", Static).update(
-                _format_approval_workspace(
-                    load_run_snapshot(log_root=self._log_root, runtime_id=self._runtime_id)
-                )
-            )
+            self._refresh_approval_panels()
         except Exception as exc:
             status.update(f"AI 修改产物失败: {exc}")
 
@@ -802,13 +848,16 @@ class RuntimeApprovalsScreen(Screen[None]):
                 service.resume_run(self._runtime_id)
                 message = handler(service)
             status.update(f"{action}: {message}")
-            self.query_one("#approvals-workspace", Static).update(
-                _format_approval_workspace(
-                    load_run_snapshot(log_root=self._log_root, runtime_id=self._runtime_id)
-                )
-            )
+            self._refresh_approval_panels()
         except Exception as exc:
             status.update(f"{action}失败: {exc}")
+
+    def _refresh_approval_panels(self) -> None:
+        snapshot = load_run_snapshot(log_root=self._log_root, runtime_id=self._runtime_id)
+        self.query_one("#approvals-workspace", Static).update(_format_approval_workspace(snapshot))
+        self.query_one("#approval-artifact-preview", Static).update(
+            _format_waiting_artifact_preview(snapshot, self._log_root)
+        )
 
 
 class RuntimeLogScreen(Screen[None]):
@@ -1018,6 +1067,7 @@ def _format_artifacts_workspace(snapshot: RunSnapshot) -> str:
         "产物",
         f"运行 ID: {snapshot.runtime_id}",
         f"产物数: {len(snapshot.artifacts)}",
+        "可在下方输入产物 ID 和版本查看内容；版本留空表示最新版本。",
     ]
     for artifact in snapshot.artifacts[-30:]:
         artifact_id = _string_value(artifact.get("artifact_id")) or "artifact"
@@ -1028,6 +1078,141 @@ def _format_artifacts_workspace(snapshot: RunSnapshot) -> str:
     if len(snapshot.artifacts) > 30:
         lines.append(f"... 还有 {len(snapshot.artifacts) - 30} 个版本")
     return "\n".join(lines)
+
+
+def _format_waiting_artifact_preview(snapshot: RunSnapshot, log_root: Path) -> str:
+    if snapshot.runtime_id is None:
+        return "当前产物\n暂无运行。"
+    approval = snapshot.waiting_approval
+    if approval is None:
+        return "当前产物\n当前无等待审批产物。"
+    artifact_id = _string_value(approval.get("artifact_id"))
+    artifact_version = _optional_int_value(approval.get("artifact_version"))
+    if not artifact_id:
+        return "当前产物\n当前审批没有绑定产物。"
+    try:
+        from inklink.workflow.service import WorkflowService
+
+        with WorkflowService(log_root=log_root) as service:
+            service.inspect_run(snapshot.runtime_id)
+            artifact = service.get_artifact(artifact_id, artifact_version)
+    except Exception as exc:
+        return f"当前产物\n读取 {artifact_id}@{artifact_version or 'latest'} 失败: {exc}"
+    return _format_artifact_preview(artifact)
+
+
+def _artifact_view_defaults(snapshot: RunSnapshot) -> tuple[str, str]:
+    approval = snapshot.waiting_approval
+    if approval is None:
+        return ("", "")
+    artifact_id = _string_value(approval.get("artifact_id"))
+    artifact_version = _optional_int_value(approval.get("artifact_version"))
+    return (artifact_id, "" if artifact_version is None else str(artifact_version))
+
+
+def _format_artifact_preview(artifact: dict[str, object], *, max_chars: int = 12000) -> str:
+    artifact_id = _string_value(artifact.get("artifact_id")) or "artifact"
+    artifact_type = _string_value(artifact.get("artifact_type")) or "unknown"
+    version = artifact.get("version") or "?"
+    payload = artifact.get("payload")
+    body = _format_artifact_payload(payload)
+    if len(body) > max_chars:
+        body = body[:max_chars].rstrip() + "\n... 已截断，完整内容请查看日志目录中的 artifact。"
+    return "\n".join(
+        [
+            f"当前产物: {artifact_id}@{version}",
+            f"类型: {artifact_type}",
+            "",
+            body,
+        ]
+    )
+
+
+def _format_artifact_payload(payload: object) -> str:
+    if isinstance(payload, dict):
+        outline = payload.get("outline")
+        if isinstance(outline, str):
+            lines = ["大纲:", outline]
+            notes = payload.get("notes")
+            if isinstance(notes, list) and notes:
+                lines.extend(["", "备注:", *_format_string_list(notes)])
+            return "\n".join(lines)
+        change_summary = payload.get("change_summary")
+        if isinstance(change_summary, str):
+            return "\n".join(["修改摘要:", change_summary, "", _pretty_json(payload)])
+        scenes = payload.get("scenes")
+        if isinstance(scenes, list):
+            return _format_scene_plan_payload(payload)
+    if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
+        return _format_chapter_plan_payload(payload)
+    return _pretty_json(payload)
+
+
+def _format_chapter_plan_payload(payload: list[object]) -> str:
+    lines = ["章节计划:"]
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        chapter_number = item.get("chapter_number")
+        title = _string_value(item.get("title")) or "未命名"
+        lines.append(f"- 第 {chapter_number} 章 {title}")
+        for key, label in (
+            ("summary", "摘要"),
+            ("core_conflict", "核心冲突"),
+            ("emotional_peak", "情绪峰值"),
+            ("ending_hook", "结尾钩子"),
+        ):
+            value = _string_value(item.get(key))
+            if value:
+                lines.append(f"  {label}: {value}")
+        min_chars = item.get("min_chars")
+        max_chars = item.get("max_chars")
+        if isinstance(min_chars, int) and isinstance(max_chars, int):
+            lines.append(f"  字数: {min_chars}-{max_chars}")
+        for key, label in (
+            ("required_characters", "必须人物"),
+            ("required_keywords", "必须关键词"),
+            ("scene_ids", "场景"),
+            ("forbidden", "禁忌"),
+        ):
+            values = item.get(key)
+            if isinstance(values, list) and values:
+                lines.append(f"  {label}: {', '.join(str(value) for value in values)}")
+    return "\n".join(lines)
+
+
+def _format_scene_plan_payload(payload: dict[str, object]) -> str:
+    chapter_number = payload.get("chapter_number")
+    lines = [f"场景计划: 第 {chapter_number} 章"]
+    scenes = payload.get("scenes")
+    if not isinstance(scenes, list):
+        return _pretty_json(payload)
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        scene_id = _string_value(scene.get("scene_id")) or "scene"
+        goal = _string_value(scene.get("goal"))
+        lines.append(f"- {scene_id}: {goal or '未填写目标'}")
+        for key, label in (
+            ("characters", "人物"),
+            ("required_keywords", "关键词"),
+        ):
+            values = scene.get(key)
+            if isinstance(values, list) and values:
+                lines.append(f"  {label}: {', '.join(str(value) for value in values)}")
+        min_chars = scene.get("min_chars")
+        max_chars = scene.get("max_chars")
+        if isinstance(min_chars, int) and isinstance(max_chars, int):
+            lines.append(f"  字数: {min_chars}-{max_chars}")
+    return "\n".join(lines)
+
+
+def _format_string_list(values: list[object]) -> list[str]:
+    return [f"- {value}" for value in values if isinstance(value, str) and value.strip()]
+
+
+def _pretty_json(payload: object) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def _format_approval_workspace(snapshot: RunSnapshot) -> str:
@@ -1183,6 +1368,14 @@ def _int_value(value: object) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return 0
+
+
+def _optional_int_value(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return None
 
 
 def _blank_to_none(value: str) -> str | None:
