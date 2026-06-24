@@ -40,7 +40,7 @@ load_project
 
 审批聊天每轮消息都会入库、参与幂等键，并在 `chat-update` 时作为完整会话历史交给对应 `update_*` 工具。AI 更新产物后会把 change summary 写回审批消息，避免后续轮次只看到最后一句用户意见。
 
-当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。WebUI 可填写运行参数并启动或恢复 runtime；启动后工作台会持续刷新当前阶段、节点、章节、LLM 任务、最近事件和用量统计，并在长时间无新进度时提示可能正在等待模型、限流或 IO。WebUI 会持久化运行设置和 notes，但不会在浏览器重启后自动连接旧 runtime；用户需要填写运行 ID 并点击“续接”，也可用“清空工作台”脱离当前 runtime。进入审批点或 writeback 冲突时，WebUI 右侧审批区会预填审批 ID、产物 ID、类型、版本和相关章节号，并直接预览当前 artifact 内容；用户可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节。
+当前 pipeline 会在未自动批准的大纲、章节计划、场景计划和自审失败处暂停，并把 run 状态写为 `waiting_approval`。用户可用 `inklink workflow message` 记录讨论，用 `chat-update` 通过 LLM 工具生成新的讨论稿 artifact，用 `approve` 将某个 artifact 版本标为定稿，再用 `--resume-runtime-id` 继续。WebUI 可填写运行参数并启动或恢复 runtime；启动后工作台会持续刷新当前阶段、节点、章节、LLM 任务、最近事件和用量统计，并在长时间无新进度时提示可能正在等待模型、限流或 IO。WebUI 会持久化运行设置和 notes，但不会在浏览器重启后自动连接旧 runtime；用户需要填写运行 ID 并点击“连接”只查看仍在运行的任务，或点击“续接”恢复已停止/已暂停的任务，也可用“清空工作台”脱离当前 runtime。进入审批点或 writeback 冲突时，WebUI 右侧审批区会预填审批 ID、产物 ID、类型、版本和相关章节号，并直接预览当前 artifact 的完整 JSON 内容；用户可记录审批消息、调用 AI 工具修改产物、批准绑定或指定产物版本、重试、放弃章节和重写章节。
 
 若模型返回了不可解析的 tool 参数 JSON、未调用期望工具或返回不符合 schema 的结构，pipeline 会按对应 model profile 的 `max_retries` 自动重试。重试耗尽后会把当前 LLM call 和正在执行的节点标为 `failed`，写入 `run_failed` 事件，并把 `run_summary.json` 与 SQLite run 状态更新为 `failed`；WebUI 或 CLI 查询都会从持久化摘要中显示失败原因。
 

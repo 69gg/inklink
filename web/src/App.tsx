@@ -169,6 +169,18 @@ export default function App() {
     });
   }
 
+  async function connectRun() {
+    const targetRuntimeId = form.runtime_id.trim();
+    if (!targetRuntimeId) return;
+    await execute('已连接运行', async () => {
+      const next = await loadSnapshot(targetRuntimeId, form.log_root);
+      setSnapshot(next);
+      setArtifact(null);
+      setDiffText('');
+      setActiveRuntimeId(next.runtime_id ?? targetRuntimeId);
+    });
+  }
+
   function resetWorkspace() {
     setActiveRuntimeId('');
     setSnapshot(null);
@@ -178,7 +190,7 @@ export default function App() {
     setDiffLeft('');
     setDiffRight('');
     setDiffText('');
-    setStatus('已清空工作台，填写或粘贴运行 ID 后可重新续接。');
+    setStatus('已清空工作台，填写或粘贴运行 ID 后可重新连接或续接。');
     setForm((current) => ({ ...current, runtime_id: '' }));
   }
 
@@ -321,7 +333,7 @@ export default function App() {
           <input
             value={form.runtime_id}
             onChange={(event) => updateRuntimeId(event.target.value)}
-            placeholder="留空创建新运行；填写后点击续接"
+            placeholder="留空创建新运行；填写后可连接或续接"
           />
         </label>
 
@@ -442,6 +454,9 @@ export default function App() {
         <div className="button-row">
           <button type="button" onClick={runStart} disabled={busy || formErrors.length > 0}>
             <Play size={16} /> 开始
+          </button>
+          <button type="button" onClick={connectRun} disabled={busy || !form.runtime_id.trim()}>
+            <FileText size={16} /> 连接
           </button>
           <button type="button" onClick={runResume} disabled={busy || !form.runtime_id.trim()}>
             <RefreshCw size={16} /> 续接
@@ -662,7 +677,7 @@ export default function App() {
                 </button>
               </div>
               {diffText ? <pre className="diff-view">{diffText}</pre> : null}
-              <pre>{formatArtifact(artifact.payload)}</pre>
+              <pre className="artifact-payload">{formatArtifact(artifact.payload)}</pre>
             </>
           ) : (
             <p className="muted">选择产物或进入审批后自动显示内容。</p>
@@ -785,41 +800,12 @@ function compactJson(value: unknown): string {
 }
 
 function formatArtifact(value: unknown): string {
-  if (Array.isArray(value)) {
-    return value.map((item, index) => formatObjectBlock(item, index + 1)).join('\n\n');
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value ?? '');
+  } catch {
+    return String(value ?? '');
   }
-  if (typeof value === 'object' && value !== null) {
-    const record = value as Record<string, unknown>;
-    if (typeof record.outline === 'string') return record.outline;
-    return formatObjectBlock(record, 0);
-  }
-  return String(value ?? '');
-}
-
-function formatObjectBlock(value: unknown, index: number): string {
-  if (typeof value !== 'object' || value === null) return String(value ?? '');
-  const record = value as Record<string, unknown>;
-  const title = typeof record.title === 'string' ? record.title : index ? `#${index}` : '内容';
-  const lines = [title];
-  for (const key of ['summary', 'core_conflict', 'emotional_peak', 'ending_hook', 'goal']) {
-    if (typeof record[key] === 'string' && record[key]) lines.push(`${labelFor(key)}：${record[key]}`);
-  }
-  if (Array.isArray(record.scenes)) {
-    lines.push('场景：');
-    for (const scene of record.scenes) lines.push(`- ${formatObjectBlock(scene, 0).replace(/\n/g, '；')}`);
-  }
-  if (lines.length > 1) return lines.join('\n');
-  return JSON.stringify(value, null, 2);
-}
-
-function labelFor(key: string): string {
-  return {
-    summary: '摘要',
-    core_conflict: '核心冲突',
-    emotional_peak: '情绪峰值',
-    ending_hook: '收束/钩子',
-    goal: '目标',
-  }[key] ?? key;
 }
 
 function errorMessage(error: unknown): string {

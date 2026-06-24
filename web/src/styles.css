@@ -500,8 +500,13 @@ textarea:focus {
   font-weight: 800;
 }
 
+.artifact-viewer {
+  display: flex;
+  flex-direction: column;
+  max-height: min(58vh, 760px);
+}
+
 .artifact-viewer pre {
-  max-height: calc(100vh - 360px);
   overflow: auto;
   margin: 0;
   border-left: 3px solid #2f7b75;
@@ -509,6 +514,10 @@ textarea:focus {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   background: rgba(255, 255, 255, 0.76);
+}
+
+.artifact-viewer .artifact-payload {
+  max-height: min(42vh, 520px);
 }
 
 .diff-controls {
@@ -527,7 +536,7 @@ textarea:focus {
 }
 
 .artifact-viewer .diff-view {
-  max-height: 220px;
+  max-height: min(20vh, 220px);
   margin-bottom: 10px;
   border-left-color: #b98935;
 }
@@ -554,8 +563,16 @@ textarea:focus {
     border-left: 0;
   }
 
-  .artifact-viewer pre {
-    max-height: 520px;
+  .artifact-viewer {
+    max-height: 620px;
+  }
+
+  .artifact-viewer .artifact-payload {
+    max-height: 420px;
+  }
+
+  .artifact-viewer .diff-view {
+    max-height: 180px;
   }
 }
 
